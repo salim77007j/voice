@@ -13,9 +13,12 @@
 //! `transport` — playback with play/pause/stop/seek.
 
 mod error;
+pub mod mp3;
+pub mod resample;
 pub mod wav;
 
 pub use error::{Error, Result};
+pub use mp3::{Mp3Bitrate, Mp3Settings, VbrQuality};
 pub use wav::WavDepth;
 
 /// Interleaved `f32` audio with its sample rate and channel count.
@@ -70,5 +73,37 @@ impl InterleavedAudio {
     /// Duration in seconds.
     pub fn duration_seconds(&self) -> f64 {
         self.frames() as f64 / self.sample_rate as f64
+    }
+}
+
+/// Import an audio file, auto-detecting the format from extension and
+/// content. WAV via hound (with a symphonia fallback for exotic RIFF
+/// dialects), MP3 via symphonia.
+///
+/// # Errors
+/// [`Error::UnsupportedFormat`] for anything that is neither RIFF/WAVE nor
+/// MPEG audio, plus decoder errors from the underlying libraries.
+pub fn import(path: &std::path::Path) -> Result<InterleavedAudio> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "wav" | "wave" => wav::import(path)
+            .or_else(|e| mp3::import_any(path).map(|(audio, _)| audio).map_err(|_| e)),
+        "mp3" => mp3::import(path),
+        _ => {
+            // Unknown extension: sniff the content.
+            if mp3::looks_like_mp3(path)? {
+                mp3::import(path)
+            } else if wav::looks_like_wav(path)? {
+                wav::import(path)
+            } else {
+                Err(Error::UnsupportedFormat(format!(
+                    "'{}' is not a supported audio format (WAV or MP3)",
+                    path.display()
+                )))
+            }
+        }
     }
 }

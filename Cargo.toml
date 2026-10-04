@@ -14,7 +14,11 @@ authors = ["Micro-Vocal Lab contributors"]
 thiserror = "2"
 cpal = "0.18"
 hound = "3.5"
-symphonia = { version = "0.6", default-features = false, features = ["mp3", "wav", "pcm"] }
+# NOTE: symphonia is deliberately pinned to the 0.5 line. The 2026
+# republished 0.6.x is a v2 development preview whose own docs state
+# "SemVer compatibility is not guaranteed ... never use in any production
+# application". 0.5.5 is the mature, classic-API release.
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "pcm"] }
 mp3lame-encoder = "0.2"
 rubato = "5"
 rtrb = "0.4"
