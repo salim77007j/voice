@@ -23,17 +23,17 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Research + architecture plan | ✅ done — see [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md) |
-| 2 | Scaffold + audio I/O (record, import, export, playback) | ⏳ next |
-| 3 | DSP engine (pitch / air / formant) | planned |
+| 2 | Scaffold + audio I/O (record, import, export, playback) | ✅ done — see [`docs/PHASE_2_REPORT.md`](docs/PHASE_2_REPORT.md) |
+| 3 | DSP engine (pitch / air / formant) | ⏳ next |
 | 4 | UI (Slint, EN + RTL) | planned |
 | 5 | CI + integration + testing | planned |
 | 6 | Final validation + v1.0.0 | planned |
 
 ## Technology
 
-Rust · [Slint](https://slint.dev) 1.18 (UI) · cpal (audio I/O) · hound (WAV) ·
-symphonia (decode) · LAME 3.100 bundled (MP3 encode) · rustfft/realfft (STFT) ·
-rubato (resampling). Full decision record with rejected alternatives:
+Rust · [Slint](https://slint.dev) 1.18 (UI, Phase 4) · cpal 0.18 (audio I/O) · hound 3.5 (WAV) ·
+symphonia 0.5 (MP3 decode) · LAME 3.100 bundled (MP3 encode) · rubato 5 (resampling) ·
+rustfft/realfft (STFT, Phase 3). Full decision record with rejected alternatives:
 [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md).
 
 ## License
