@@ -13,8 +13,10 @@
 //! `transport` — playback with play/pause/stop/seek.
 
 mod error;
+pub mod wav;
 
 pub use error::{Error, Result};
+pub use wav::WavDepth;
 
 /// Interleaved `f32` audio with its sample rate and channel count.
 ///
