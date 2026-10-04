@@ -43,8 +43,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install ALSA dev package
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install ALSA + fontconfig dev packages
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
       - name: cargo fmt --check
         run: cargo fmt --all --check
       - name: cargo clippy
@@ -67,9 +67,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install ALSA dev package
+      - name: Install ALSA + fontconfig dev packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
       - name: Virtual audio (ALSA null PCM) for device-path smoke tests
         if: runner.os == 'Linux'
         run: |
@@ -109,9 +109,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install ALSA dev package
+      - name: Install ALSA + fontconfig dev packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
       - name: cargo build --release
         run: cargo build --release --bin micro-vocal-lab
       - name: Package (unix)
