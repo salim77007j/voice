@@ -35,3 +35,23 @@ Append-only log. One entry per sub-item, per the phased execution protocol.
 **2.5 Player + transport** (commit `b8a6d82`) — pure `Transport` state machine (idempotent controls, clamped seek, natural end). Feeder thread + `SinkLogic` (testable consumer: pause=ring-preserving silence, seek=generation-counter flush, underrun-safe) + lock-free position (`base + fed − consumed`). One-shot device adaptation: rubato resample + mono↔stereo mix.
 
 **Phase 2 exit state:** 3,235 LOC, 62 crates in tree, 48 tests green (2 hardware-ignored), fmt+clippy `-D warnings` clean, release binary 355 KB. Container has no real sound card — hardware tests are `#[ignore]`d for Phase 5 dev-machine verification. Gaps: 64-bit float WAV rejected loudly (hound limitation); player resamples up front (streamed preview path comes with Phase 3 engine). Waiting for "continue" to start Phase 3 (DSP engine).
+
+---
+
+## 2026-10-04 — Phase 3: DSP Engine
+
+**3.1 STFT core** (commit `4f9e2be`) — streaming analyzer + exact-denominator OLA, left-flush pre-padding (perfect edge reconstruction), unity-COLA test, realfft/rustfft/pitch-detection/rubato added to mvl-core.
+
+**3.2 Analysis layer** (commit `581b104`) — YIN via pitch-detection 0.3: **its clarity field is broken (−0.33 on pure tones)** → strictness 0.85 + MPM-style autocorrelation voicing; 2×-window retry for male F0 (85 Hz needs 2048 @48k); ≥96 kHz stride decimation; spectral features; Voiced/Sibilant/Breath/Silence classifier + causal majority smoothing; 1.3 ms transient detector; testsupport golden-signal generators.
+
+**3.3 Pitch path** (commit `78548ac`) — identity-locked PV (Laroche-Dolson regions, reduced locking unvoiced, DC/Nyquist bypass — realfft requires exact-zero im there), Bresenham absolute-position hops (zero drift), rubato Async sinc 32-tap with discarded group delay (impulse-verified). +7 st on 220 Hz stack → 329.6 Hz (±0.5 %), duration sample-exact, periodicity clarity > 0.8.
+
+**3.4 Formant warper** (commits `de6d712`, `ef31737`) — iterative cepstral true envelope (F0-aware lifter), Bark warp f→f·g, ±18 dB clamp, Nyquist fold-back. Magnitude-only: F0 preserved to 0.1 %.
+
+**3.5 Air/breath engine** (commit `ee2ab5d`) — classifier-gated duck (−40 dB, 5/120 ms ballistics), confidence-weighted de-esser (−24 dB, 4–10 kHz), tilted shelf (+6 dB), octave-up harmonic air injection (voicing-gated). **Regression fixed:** left-flush pad frames misclassified voiced onsets as breath (−40 dB duck ate the first 150 ms) → partial-window frames fall back to Silence.
+
+**3.6 Engine + limiter** (commit `5b05b98`) — full chain assembly, neutral bit-exact bypass, hop-granularity internal feeding (bulk == streamed, bit-identical), 4×-oversampled true-peak guard, `mvl-app process` CLI. **Three invariant-suite finds fixed:** bulk-push history trimming; frame-rate AM rumble from wobbling envelope estimates (harmonic-sampled envelopes + cross-frame one-pole + first-frame passthrough); spectral-empty-space gating by bin level. All §6.7 invariants green.
+
+**3.7 Fixtures + docs** (this commit) — `testdata/` (7 deterministic sources) + `samples/` (8 before/after renders + README) committed with a bit-exact reproduction test; PHASE_3_REPORT.md.
+
+**Phase 3 exit state:** 111 → 114 tests green (mvl-io 42+3, mvl-core 69; 4 ignored: 2 hardware + 2 regenerators), fmt+clippy clean, release 21.7× realtime render, binary 375 KB. Honest gaps: real-vocal listening tests deferred to Phase 5; pitch-param mid-stream changes rebuild the TSM path (transient); preview formant warp ~95 % of requested on dense harmonics (§6.6 trade-off, tested). Waiting for "continue" to start Phase 4 (Slint UI).

@@ -24,8 +24,8 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 |---|---|---|
 | 1 | Research + architecture plan | ✅ done — see [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md) |
 | 2 | Scaffold + audio I/O (record, import, export, playback) | ✅ done — see [`docs/PHASE_2_REPORT.md`](docs/PHASE_2_REPORT.md) |
-| 3 | DSP engine (pitch / air / formant) | ⏳ next |
-| 4 | UI (Slint, EN + RTL) | planned |
+| 3 | DSP engine (pitch / air / formant) | ✅ done — see [`docs/PHASE_3_REPORT.md`](docs/PHASE_3_REPORT.md) |
+| 4 | UI (Slint, EN + RTL) | ⏳ next |
 | 5 | CI + integration + testing | planned |
 | 6 | Final validation + v1.0.0 | planned |
 
@@ -35,6 +35,21 @@ Rust · [Slint](https://slint.dev) 1.18 (UI, Phase 4) · cpal 0.18 (audio I/O) �
 symphonia 0.5 (MP3 decode) · LAME 3.100 bundled (MP3 encode) · rubato 5 (resampling) ·
 rustfft/realfft (STFT, Phase 3). Full decision record with rejected alternatives:
 [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md).
+
+## Try the engine today (pre-UI)
+
+The Phase 3 binary exposes the full DSP engine from the command line:
+
+```sh
+cargo run --release -p mvl-app -- process input.wav output.wav \
+    --pitch 5.0 --air -40 --tract 130 --profile render
+```
+
+`--pitch` semitones (±12, 0.01 resolution) · `--air` percent (−100…+100) ·
+`--tract` mm (100–260, 170 neutral) · `--profile preview|render`.
+Before/after examples of every processing mode are committed in
+[`samples/`](samples/) (see its README), generated from the deterministic
+sources in [`testdata/`](testdata/).
 
 ## License
 
