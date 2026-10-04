@@ -112,3 +112,25 @@ msgstr "لم يُعثر على جهاز إدخال صوتي"
 
 msgid "No audio output device found"
 msgstr "لم يُعثر على جهاز إخراج صوتي"
+
+# --- audio devices dialog (Phase 7.1, BUG 1/3) ---
+msgid "Devices"
+msgstr "الأجهزة"
+
+msgid "Choose audio input and output devices"
+msgstr "اختر أجهزة إدخال وإخراج الصوت"
+
+msgid "Audio Devices"
+msgstr "أجهزة الصوت"
+
+msgid "Input device (recording)"
+msgstr "جهاز الإدخال (التسجيل)"
+
+msgid "Output device (playback)"
+msgstr "جهاز الإخراج (التشغيل)"
+
+msgid "Close"
+msgstr "إغلاق"
+
+msgid "Automatic (all devices)"
+msgstr "تلقائي (كل الأجهزة)"

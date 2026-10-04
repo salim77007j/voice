@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use mvl_core::{QualityProfile, VocalEngine, VocalParams};
 use mvl_io::{transport, InterleavedAudio};
@@ -187,11 +187,39 @@ impl PreviewPlayer {
     /// format is unsupported; `Error::Resample` on rate conversion
     /// failure.
     pub fn new(source: &InterleavedAudio) -> mvl_io::Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| mvl_io::Error::Device("no default output device found".into()))?;
-        Self::on_device(&device, source)
+        // BUG 3 fix: try every output device on every host, not just the
+        // default pointer (mirror of mvl-io's Player::new).
+        let inv = mvl_io::devices::list();
+        let default_host = cpal::default_host().id().name().to_string();
+        let candidates = mvl_io::devices::fallback_order(&inv.outputs, &default_host);
+        let mut last_err: Option<mvl_io::Error> = None;
+        for cand in candidates {
+            let dev = match mvl_io::devices::open_by_id(&cand.id()) {
+                Ok(d) => d,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            match Self::on_device(&dev, source) {
+                Ok(p) => return Ok(p),
+                Err(e) => {
+                    eprintln!(
+                        "mvl-app: preview device '{}' failed to open, trying next: {e}",
+                        cand.label()
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(match last_err {
+            Some(e) if inv.outputs.len() <= 1 => e,
+            Some(e) => mvl_io::Error::Device(format!(
+                "tried {} output device(s); last failure: {e}",
+                inv.outputs.len()
+            )),
+            None => mvl_io::devices::no_output_device_error(&inv),
+        })
     }
 
     /// [`PreviewPlayer::new`] on a specific device.
@@ -206,9 +234,13 @@ impl PreviewPlayer {
         let device_channels = default.channels();
 
         // Run the whole DSP chain at the device rate: the source is
-        // resampled once up front (the 48 kHz → 44.1 kHz case) and mono is
-        // upmixed when the device is stereo, so the sink is a plain copy.
-        let adapted = Arc::new(adapt(source, device_rate, device_channels)?);
+        // resampled once up front (the 48 kHz → 44.1 kHz case) and channels
+        // are up/down-mixed generically (5.1 outputs, aggregates…).
+        let adapted = Arc::new(mvl_io::channels::adapt(
+            source,
+            device_rate,
+            device_channels,
+        )?);
 
         let shared = Shared::new();
         shared
@@ -258,6 +290,61 @@ impl PreviewPlayer {
                 .build_output_stream::<f32, _, _>(
                     stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| sink.fill(data),
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| mvl_io::Error::Device(format!("open preview stream: {e}")))?,
+            cpal::SampleFormat::I16 => device
+                .build_output_stream::<i16, _, _>(
+                    stream_config,
+                    {
+                        let mut shim = SinkShim::from(sink);
+                        move |data: &mut [i16], _: &cpal::OutputCallbackInfo| shim.fill_i16(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| mvl_io::Error::Device(format!("open preview stream: {e}")))?,
+            cpal::SampleFormat::I32 => device
+                .build_output_stream::<i32, _, _>(
+                    stream_config,
+                    {
+                        let mut shim = SinkShim::from(sink);
+                        move |data: &mut [i32], _: &cpal::OutputCallbackInfo| shim.fill_i32(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| mvl_io::Error::Device(format!("open preview stream: {e}")))?,
+            cpal::SampleFormat::U16 => device
+                .build_output_stream::<u16, _, _>(
+                    stream_config,
+                    {
+                        let mut shim = SinkShim::from(sink);
+                        move |data: &mut [u16], _: &cpal::OutputCallbackInfo| shim.fill_u16(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| mvl_io::Error::Device(format!("open preview stream: {e}")))?,
+            cpal::SampleFormat::U32 => device
+                .build_output_stream::<u32, _, _>(
+                    stream_config,
+                    {
+                        let mut shim = SinkShim::from(sink);
+                        move |data: &mut [u32], _: &cpal::OutputCallbackInfo| shim.fill_u32(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| mvl_io::Error::Device(format!("open preview stream: {e}")))?,
+            cpal::SampleFormat::U8 => device
+                .build_output_stream::<u8, _, _>(
+                    stream_config,
+                    {
+                        let mut shim = SinkShim::from(sink);
+                        move |data: &mut [u8], _: &cpal::OutputCallbackInfo| shim.fill_u8(data)
+                    },
                     err_cb,
                     None,
                 )
@@ -442,6 +529,67 @@ impl SinkLogic {
     }
 }
 
+/// Integer-format device adapter: fills an f32 scratch buffer via
+/// [`SinkLogic`], then converts per callback. The studio path is F32;
+/// these cover ALSA S16 defaults, WASAPI i32 endpoints, and U8 devices.
+struct SinkShim {
+    inner: SinkLogic,
+    scratch: Vec<f32>,
+}
+
+impl From<SinkLogic> for SinkShim {
+    fn from(inner: SinkLogic) -> Self {
+        Self {
+            inner,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl SinkShim {
+    fn fill_f32_into(&mut self, len: usize) -> &[f32] {
+        self.scratch.clear();
+        self.scratch.resize(len, 0.0);
+        self.inner.fill(&mut self.scratch);
+        &self.scratch
+    }
+
+    fn fill_i16(&mut self, data: &mut [i16]) {
+        let s = self.fill_f32_into(data.len());
+        for (d, &v) in data.iter_mut().zip(s) {
+            *d = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
+    }
+
+    fn fill_i32(&mut self, data: &mut [i32]) {
+        let s = self.fill_f32_into(data.len());
+        for (d, &v) in data.iter_mut().zip(s) {
+            *d = (v.clamp(-1.0, 1.0) * 2147483647.0) as i32;
+        }
+    }
+
+    fn fill_u16(&mut self, data: &mut [u16]) {
+        let s = self.fill_f32_into(data.len());
+        for (d, &v) in data.iter_mut().zip(s) {
+            *d = ((v.clamp(-1.0, 1.0) + 1.0) * 32767.5) as u16;
+        }
+    }
+
+    fn fill_u32(&mut self, data: &mut [u32]) {
+        let s = self.fill_f32_into(data.len());
+        for (d, &v) in data.iter_mut().zip(s) {
+            *d = ((v.clamp(-1.0, 1.0) + 1.0) * 2147483647.5) as u32;
+        }
+    }
+
+    fn fill_u8(&mut self, data: &mut [u8]) {
+        let s = self.fill_f32_into(data.len());
+        for (d, &v) in data.iter_mut().zip(s) {
+            *d = ((v.clamp(-1.0, 1.0) + 1.0) * 127.5) as u8;
+        }
+    }
+}
+
 /// Feeder thread: owns the pipeline + transport, streams processed blocks
 /// into the ring while playing. The pipeline (and its engines) is
 /// constructed *inside* this thread because `VocalEngine` is not `Send`.
@@ -587,33 +735,8 @@ fn bump_generation(shared: &Shared, fed_since_bump: &mut u64, base_samples: u64)
     shared.base.store(base_samples, Ordering::Release);
 }
 
-/// Resample (rate) and up/down-mix (channels) to the device format.
-fn adapt(source: &InterleavedAudio, rate: u32, channels: u16) -> mvl_io::Result<InterleavedAudio> {
-    let rate_matched = mvl_io::resample::resample(source, rate)?;
-    if rate_matched.channels == channels {
-        return Ok(rate_matched);
-    }
-    let frames = rate_matched.frames();
-    let src_ch = rate_matched.channels as usize;
-    let mut mixed = Vec::with_capacity(frames * channels as usize);
-    for f in 0..frames {
-        let frame = &rate_matched.data[f * src_ch..(f + 1) * src_ch];
-        match (src_ch, channels as usize) {
-            (1, 2) => {
-                mixed.push(frame[0]);
-                mixed.push(frame[0]);
-            }
-            (2, 1) => mixed.push((frame[0] + frame[1]) * 0.5),
-            _ => {
-                return Err(mvl_io::Error::Device(format!(
-                    "unsupported channel adaptation: {src_ch} source -> {} device channels",
-                    channels
-                )));
-            }
-        }
-    }
-    InterleavedAudio::new(mixed, rate, channels)
-}
+// Channel/rate adaptation now lives in `mvl_io::channels::adapt` (one
+// generalized implementation for every player).
 
 #[cfg(test)]
 mod tests {
@@ -762,11 +885,11 @@ mod tests {
     #[test]
     fn stereo_adapts() {
         let mono = tone(10, 48_000);
-        let stereo = adapt(&mono, 48_000, 2).unwrap();
+        let stereo = mvl_io::channels::adapt(&mono, 48_000, 2).unwrap();
         assert_eq!(stereo.channels, 2);
         assert_eq!(stereo.frames(), 10);
         assert_eq!(stereo.data[1], mono.data[0]);
-        let back = adapt(&stereo, 48_000, 1).unwrap();
+        let back = mvl_io::channels::adapt(&stereo, 48_000, 1).unwrap();
         assert_eq!(back.data[0], mono.data[0]);
     }
 

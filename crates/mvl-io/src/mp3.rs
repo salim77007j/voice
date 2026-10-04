@@ -256,6 +256,13 @@ fn decode_with_symphonia(path: &Path) -> Result<(InterleavedAudio, String)> {
 
     let mut data: Vec<f32> = Vec::new();
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    // Damaged-file tolerance (BUG 2): a single corrupt frame in the middle
+    // of an MP3 must not kill the whole import. Symphonia's decode errors
+    // on individual packets are recoverable — skip the packet, count it,
+    // keep going (the same strategy Audacity and foobar2000 use). If the
+    // file yields *some* audio we succeed; only an utterly undecodable
+    // file (zero good packets) is an error.
+    let mut bad_packets: u32 = 0;
 
     loop {
         let packet = match format.next_packet() {
@@ -277,9 +284,32 @@ fn decode_with_symphonia(path: &Path) -> Result<(InterleavedAudio, String)> {
             continue;
         }
 
-        let decoded = decoder
-            .decode(&packet)
-            .map_err(|e| Error::Mp3Decode(format!("decode '{}': {e}", path.display())))?;
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SymphoniaError::DecodeError(_)) => {
+                // recoverable: this frame is garbage, the next may be fine
+                bad_packets += 1;
+                continue;
+            }
+            Err(e) => {
+                // anything else (IoError inside decode, ResetRequired…) is
+                // structural — but if we already have audio, deliver it
+                // rather than failing a mostly-good import.
+                if !data.is_empty() {
+                    eprintln!(
+                        "mvl-io: '{}' stopped decoding early ({e}); \
+                         returning {} samples decoded so far",
+                        path.display(),
+                        data.len()
+                    );
+                    break;
+                }
+                return Err(Error::Mp3Decode(format!(
+                    "decode '{}': {e}",
+                    path.display()
+                )));
+            }
+        };
 
         // (Re)allocate the interleaving scratch buffer if this packet is
         // larger than any before it.
@@ -295,6 +325,25 @@ fn decode_with_symphonia(path: &Path) -> Result<(InterleavedAudio, String)> {
         let buf = sample_buf.as_mut().expect("just ensured");
         buf.copy_interleaved_ref(decoded);
         data.extend_from_slice(buf.samples());
+    }
+
+    if bad_packets > 0 {
+        eprintln!(
+            "mvl-io: '{}': skipped {} damaged frame(s) during import",
+            path.display(),
+            bad_packets
+        );
+    }
+    if data.is_empty() {
+        return Err(Error::Mp3Decode(format!(
+            "'{}': no decodable audio frames found{}",
+            path.display(),
+            if bad_packets > 0 {
+                format!(" ({bad_packets} damaged frame(s) skipped)")
+            } else {
+                String::new()
+            }
+        )));
     }
 
     let audio = InterleavedAudio::new(data, sample_rate, channels as u16)

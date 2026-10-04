@@ -62,6 +62,13 @@ struct Inner {
     inbox: crossbeam_channel::Receiver<UiMessage>,
     /// sender half handed to workers (cloned per spawn).
     inbox_tx: crossbeam_channel::Sender<UiMessage>,
+    /// Device picker (BUG 1/3): `None` = automatic (fallback chain);
+    /// `Some(device id)` = the user's explicit choice.
+    selected_input: Option<String>,
+    selected_output: Option<String>,
+    /// Cached inventory behind the picker (index → device mapping).
+    input_devices: Vec<mvl_io::DeviceInfo>,
+    output_devices: Vec<mvl_io::DeviceInfo>,
 }
 
 impl Inner {
@@ -100,6 +107,10 @@ impl Controller {
             busy: Arc::new(AtomicBool::new(false)),
             inbox: rx,
             inbox_tx: tx,
+            selected_input: None,
+            selected_output: None,
+            input_devices: Vec::new(),
+            output_devices: Vec::new(),
         }));
 
         macro_rules! wire {
@@ -125,6 +136,27 @@ impl Controller {
         wire!(on_reset_pitch, reset_pitch);
         wire!(on_reset_air, reset_air);
         wire!(on_reset_tract, reset_tract);
+        wire!(on_devices_clicked, devices_clicked);
+        wire!(on_close_devices_clicked, close_devices_clicked);
+
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_set_input_device(move |label| {
+                if let Some(app) = weak.upgrade() {
+                    set_input_device(&app, &st, label.as_str());
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_set_output_device(move |label| {
+                if let Some(app) = weak.upgrade() {
+                    set_output_device(&app, &st, label.as_str());
+                }
+            });
+        }
 
         {
             let weak = app.as_weak();
@@ -320,17 +352,35 @@ fn import_async(app: &crate::AppWindow, state: &State, path: PathBuf) {
     set_status(app, "importing", &label, "");
     let tx = Controller::inbox_tx(state);
     std::thread::spawn(move || {
-        let result = mvl_io::import(&path)
-            .map_err(|e| e.to_string())
-            .map(|audio| {
-                let name = path
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "audio".into());
-                Session::from_imported(audio, name)
-            });
+        // BUG 2 fix: a panic inside hound/symphonia used to unwind this
+        // worker silently — SessionReady never arrived, the busy flag
+        // stayed up, and the UI froze forever (reported as "the program
+        // closes"). catch_unwind converts any library panic into a typed
+        // error the status bar can show.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mvl_io::import(&path)
+                .map_err(|e| e.to_string())
+                .map(|audio| {
+                    let name = path
+                        .file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "audio".into());
+                    Session::from_imported(audio, name)
+                })
+        }))
+        .unwrap_or_else(|payload| Err(panic_message(&payload, "import")));
         let _ = tx.send(UiMessage::SessionReady(result));
     });
+}
+
+/// Render a caught panic payload into a user-presentable string.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>, what: &str) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown internal error");
+    format!("{what} failed unexpectedly: {detail}. This is a bug — the file may be damaged; other files will keep working.")
 }
 
 fn export_clicked(app: &crate::AppWindow, state: &State) {
@@ -367,9 +417,18 @@ fn export_clicked(app: &crate::AppWindow, state: &State) {
     let tx = Controller::inbox_tx(state);
     let params = state.borrow().params;
     std::thread::spawn(move || {
-        let progress_tx = tx.clone();
-        let outcome = export_session(&session, params, &path, &|p| {
-            let _ = progress_tx.send(UiMessage::ExportProgress(p));
+        // BUG 4: render/export panics must surface as typed errors, not
+        // freeze the busy flag.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let progress_tx = tx.clone();
+            export_session(&session, params, &path, &|p| {
+                let _ = progress_tx.send(UiMessage::ExportProgress(p));
+            })
+        }))
+        .unwrap_or_else(|payload| {
+            Err(mvl_io::Error::InvalidState(panic_message(
+                &payload, "export",
+            )))
         });
         let msg = match outcome {
             Ok(o) => Ok((
@@ -382,6 +441,142 @@ fn export_clicked(app: &crate::AppWindow, state: &State) {
         };
         let _ = tx.send(UiMessage::ExportDone(msg));
     });
+}
+
+// ---- device picker (BUG 1/3) --------------------------------------------
+
+/// Open the devices dialog: refresh the inventory (devices may have been
+/// plugged/unplugged since launch) and publish real names to the UI.
+fn devices_clicked(app: &crate::AppWindow, state: &State) {
+    let inv = mvl_io::devices::list();
+    let (in_idx, out_idx) = {
+        let mut inner = state.borrow_mut();
+        inner.input_devices = inv.inputs.clone();
+        inner.output_devices = inv.outputs.clone();
+        (
+            match &inner.selected_input {
+                None => 0,
+                Some(id) => inner
+                    .input_devices
+                    .iter()
+                    .position(|d| d.id() == *id)
+                    .map_or(0, |p| p as i32 + 1),
+            },
+            match &inner.selected_output {
+                None => 0,
+                Some(id) => inner
+                    .output_devices
+                    .iter()
+                    .position(|d| d.id() == *id)
+                    .map_or(0, |p| p as i32 + 1),
+            },
+        )
+    };
+
+    let auto_label = AUTO_DEVICE_LABEL;
+    let mut in_names = vec![auto_label.to_string()];
+    in_names.extend(inv.inputs.iter().map(|d| d.label()));
+    let mut out_names = vec![auto_label.to_string()];
+    out_names.extend(inv.outputs.iter().map(|d| d.label()));
+
+    let mut summary = format!(
+        "{} input(s) · {} output(s) · host: {}",
+        inv.inputs.len(),
+        inv.outputs.len(),
+        mvl_io::recorder::default_host_name(),
+    );
+    if !inv.hosts_failed.is_empty() {
+        let fails: Vec<String> = inv.hosts_failed.iter().map(|(h, _)| h.clone()).collect();
+        summary.push_str(&format!(" · failed hosts: {}", fails.join(", ")));
+    }
+    if inv.inputs.is_empty() {
+        summary.push_str("\nNo capture device visible — check OS microphone permissions.");
+    }
+
+    let in_model: slint::VecModel<slint::SharedString> = slint::VecModel::from(
+        in_names
+            .into_iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    );
+    let out_model: slint::VecModel<slint::SharedString> = slint::VecModel::from(
+        out_names
+            .into_iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    );
+    app.set_input_device_names(slint::ModelRc::new(in_model));
+    app.set_output_device_names(slint::ModelRc::new(out_model));
+    app.set_input_device_index(in_idx);
+    app.set_output_device_index(out_idx);
+    app.set_device_summary_text(summary.as_str().into());
+    app.set_show_devices(true);
+}
+
+fn close_devices_clicked(app: &crate::AppWindow, _state: &State) {
+    app.set_show_devices(false);
+}
+
+/// Label of the automatic entry (must match what `devices_clicked`
+/// publishes as element 0).
+const AUTO_DEVICE_LABEL: &str = "Automatic (all devices)";
+
+/// Resolve a ComboBox label back to a device id.
+fn device_id_for_label(devices: &[mvl_io::DeviceInfo], label: &str) -> Option<String> {
+    if label == AUTO_DEVICE_LABEL {
+        return None;
+    }
+    devices.iter().find(|d| d.label() == label).map(|d| d.id())
+}
+
+/// ComboBox selection: "Automatic…" = fallback chain; a device label
+/// pins recording to that device.
+fn set_input_device(app: &crate::AppWindow, state: &State, label: &str) {
+    let id = device_id_for_label(&state.borrow().input_devices, label);
+    let index = match &id {
+        None => 0,
+        Some(id) => state
+            .borrow()
+            .input_devices
+            .iter()
+            .position(|d| d.id() == *id)
+            .map_or(0, |p| p as i32 + 1),
+    };
+    state.borrow_mut().selected_input = id.clone();
+    app.set_input_device_index(index);
+    // The next recording uses the new device; the status line confirms it.
+    match &id {
+        Some(id) => set_status(app, "audio-loaded", &format!("input: {id}"), ""),
+        None => set_status(app, "ready", "", ""),
+    }
+}
+
+fn set_output_device(app: &crate::AppWindow, state: &State, label: &str) {
+    let id = device_id_for_label(&state.borrow().output_devices, label);
+    let index = match &id {
+        None => 0,
+        Some(id) => state
+            .borrow()
+            .output_devices
+            .iter()
+            .position(|d| d.id() == *id)
+            .map_or(0, |p| p as i32 + 1),
+    };
+    {
+        let mut inner = state.borrow_mut();
+        inner.selected_output = id;
+        // rebuild the player on the new device at next play
+        inner.player = None;
+    }
+    app.set_output_device_index(index);
+    app.set_playing(false);
+    app.set_paused(false);
+}
+
+/// Open the user-selected input device, if any (recording path).
+fn open_selected_input(state: &State) -> Option<Result<cpal::Device, mvl_io::Error>> {
+    let id = state.borrow().selected_input.clone()?;
+    Some(mvl_io::devices::open_by_id(&id))
 }
 
 fn toggle_recording(app: &crate::AppWindow, state: &State) {
@@ -398,9 +593,28 @@ fn toggle_recording(app: &crate::AppWindow, state: &State) {
         let result = recorder.stop().map_err(|e| e.to_string());
         let tx = Controller::inbox_tx(state);
         match result {
+            Ok(stats) if stats.frames == 0 => {
+                // Tapped stop before any audio arrived — an empty session
+                // would be useless (and used to render a zero-frame
+                // waveform, the BUG 2 panic path).
+                busy.store(false, Ordering::Release);
+                app.set_busy(false);
+                set_status(
+                    app,
+                    "import-error",
+                    "Recording was empty (stopped before any audio arrived)",
+                    "",
+                );
+                let _ = std::fs::remove_file(&temp_path);
+            }
             Ok(_stats) => {
                 std::thread::spawn(move || {
-                    let built = Session::from_recording(&temp_path).map_err(|e| e.to_string());
+                    // BUG 4: a panic while building the preview (resample/
+                    // mipmap) must not strand the busy flag.
+                    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Session::from_recording(&temp_path).map_err(|e| e.to_string())
+                    }))
+                    .unwrap_or_else(|payload| Err(panic_message(&payload, "recording load")));
                     let _ = tx.send(UiMessage::SessionReady(built));
                 });
             }
@@ -411,9 +625,21 @@ fn toggle_recording(app: &crate::AppWindow, state: &State) {
             }
         }
     } else {
-        // starting a new recording into a temp session WAV
+        // starting a new recording into a temp session WAV — on the
+        // user-selected device when one is pinned, else the automatic
+        // every-device fallback chain (BUG 1 fix).
         let temp = recording_path();
-        match Recorder::start(&temp, RECORD_REQUEST) {
+        let started = match open_selected_input(state) {
+            Some(Ok(dev)) => Recorder::start_on(&dev, &temp, RECORD_REQUEST),
+            Some(Err(e)) => {
+                // the pinned device vanished (unplugged): fall back to
+                // automatic rather than failing, and say so
+                eprintln!("mvl-io: selected input gone, falling back: {e}");
+                Recorder::start(&temp, RECORD_REQUEST)
+            }
+            None => Recorder::start(&temp, RECORD_REQUEST),
+        };
+        match started {
             Ok(recorder) => {
                 state.borrow_mut().recording = Some((recorder, temp));
                 app.set_recording(true);
@@ -451,15 +677,33 @@ fn play_pause(app: &crate::AppWindow, state: &State) {
     let mut inner = state.borrow_mut();
     if inner.player.is_none() {
         let preview = inner.session.as_ref().map(|s| Arc::clone(&s.preview));
-        match preview.as_deref().map(PreviewPlayer::new) {
-            Some(Ok(player)) => {
+        let selected_output = inner.selected_output.clone();
+        let built = match (&preview, &selected_output) {
+            (Some(src), Some(id)) => {
+                match mvl_io::devices::open_by_id(id) {
+                    Ok(dev) => PreviewPlayer::on_device(&dev, src).or_else(|e| {
+                        // pinned device failed: fall back to automatic
+                        eprintln!("mvl-app: selected output failed, falling back: {e}");
+                        PreviewPlayer::new(src)
+                    }),
+                    Err(e) => {
+                        eprintln!("mvl-app: selected output gone, falling back: {e}");
+                        PreviewPlayer::new(src)
+                    }
+                }
+            }
+            (Some(src), None) => PreviewPlayer::new(src),
+            (None, _) => return,
+        };
+        match built {
+            Ok(player) => {
                 let _ = player.set_params(inner.params);
                 let latency = format!("preview {:.1} ms", player.latency_ms());
                 inner.player = Some(player);
                 drop(inner);
                 app.set_preview_latency_text(latency.as_str().into());
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 drop(inner);
                 let msg = e.to_string();
                 let key = if msg.to_lowercase().contains("output") {
@@ -470,7 +714,6 @@ fn play_pause(app: &crate::AppWindow, state: &State) {
                 set_status(app, key, &msg, "");
                 return;
             }
-            None => return,
         }
     } else {
         let params = inner.params;

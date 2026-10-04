@@ -176,8 +176,22 @@ pub fn render_waveform_buffer(
     let height = height.max(1);
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width as u32, height as u32);
 
+    // BUG 2 fix (crash on import): an empty recording/import produced a
+    // zero-frame mipmap, and the old `view_end.clamp(view_start + 1,
+    // mipmap.frames())` degenerated to `clamp(1, 0)` — a guaranteed
+    // `min > max` panic that killed the app the moment such a file was
+    // loaded. Empty audio now renders an empty (transparent) canvas
+    // instead of panicking.
+    if mipmap.frames() == 0 {
+        return buffer;
+    }
+
     let view_start = view_start.min(mipmap.frames());
-    let view_end = view_end.clamp(view_start + 1, mipmap.frames());
+    let view_end = if mipmap.frames() > view_start + 1 {
+        view_end.clamp(view_start + 1, mipmap.frames())
+    } else {
+        mipmap.frames()
+    };
     let view_frames = (view_end - view_start) as f64;
 
     // sample-level stem plot when fewer samples than ~2 columns
@@ -518,6 +532,31 @@ mod tests {
                 .any(|p| p[0] == PEAK[0] && p[1] == PEAK[1]),
             "stem plot must draw teal pixels"
         );
+    }
+
+    #[test]
+    fn render_empty_mipmap_does_not_panic() {
+        // BUG 2 regression: a zero-frame recording/import used to hit
+        // `clamp(1, 0)` and kill the app. The empty mipmap must render an
+        // empty canvas instead.
+        let m = PeakMipmap::build(&[], 1);
+        assert_eq!(m.frames(), 0);
+        let img = render_waveform_buffer(&m, 1, 0, 1, 400, 200, 48_000);
+        assert_eq!((img.width(), img.height()), (400, 200));
+        assert!(
+            img.as_bytes().iter().all(|&b| b == 0),
+            "empty audio renders a fully transparent canvas"
+        );
+    }
+
+    #[test]
+    fn render_single_frame_mipmap_does_not_panic() {
+        // 1-frame mipmap: view_start.min(1) == view_end == frames() — the
+        // other degenerate clamp boundary.
+        let m = PeakMipmap::build(&[0.5f32], 1);
+        assert_eq!(m.frames(), 1);
+        let img = render_waveform_buffer(&m, 1, 0, 1, 400, 200, 48_000);
+        assert_eq!((img.width(), img.height()), (400, 200));
     }
 
     #[test]

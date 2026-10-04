@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use rtrb::{Consumer, Producer};
 
@@ -172,20 +172,48 @@ pub struct Player {
 }
 
 impl Player {
-    /// Create a player for `audio`, opening the default output device.
+    /// Create a player for `audio`, trying every output device on every
+    /// host until one actually opens a stream (BUG 3 fix).
     ///
-    /// The source is resampled to the device rate (and mono↔stereo mixed)
-    /// if needed, once, up front.
+    /// Fallback order mirrors [`crate::recorder::Recorder::start`]:
+    /// default-host default device → other defaults → everything else.
     ///
     /// # Errors
-    /// [`Error::Device`] — no output device or unsupported format;
-    /// [`Error::Resample`] — rate conversion failure.
+    /// * [`Error::Device`] — no output device or unsupported format;
+    /// * [`Error::Resample`] — rate conversion failure.
     pub fn new(audio: &InterleavedAudio) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| Error::Device("no default output device found".into()))?;
-        Self::on_device(&device, audio)
+        let inv = crate::devices::list();
+        let default_host = cpal::default_host().id().name().to_string();
+        let candidates = crate::devices::fallback_order(&inv.outputs, &default_host);
+
+        let mut last_err: Option<Error> = None;
+        for cand in candidates {
+            let dev = match crate::devices::open_by_id(&cand.id()) {
+                Ok(d) => d,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            match Self::on_device(&dev, audio) {
+                Ok(p) => return Ok(p),
+                Err(e) => {
+                    eprintln!(
+                        "mvl-io: output device '{}' failed to open, trying next: {e}",
+                        cand.label()
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(match last_err {
+            Some(e) if inv.outputs.len() <= 1 => e,
+            Some(e) => Error::Device(format!(
+                "tried {} output device(s); last failure: {e}",
+                inv.outputs.len()
+            )),
+            None => crate::devices::no_output_device_error(&inv),
+        })
     }
 
     /// Create a player on a specific output device.
@@ -247,6 +275,50 @@ impl Player {
                     {
                         let mut sink = SinkLogicShim::from(sink);
                         move |data: &mut [i16], _: &cpal::OutputCallbackInfo| sink.fill_i16(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open output stream: {e}")))?,
+            cpal::SampleFormat::I32 => device
+                .build_output_stream::<i32, _, _>(
+                    stream_config,
+                    {
+                        let mut sink = SinkLogicShim::from(sink);
+                        move |data: &mut [i32], _: &cpal::OutputCallbackInfo| sink.fill_i32(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open output stream: {e}")))?,
+            cpal::SampleFormat::U16 => device
+                .build_output_stream::<u16, _, _>(
+                    stream_config,
+                    {
+                        let mut sink = SinkLogicShim::from(sink);
+                        move |data: &mut [u16], _: &cpal::OutputCallbackInfo| sink.fill_u16(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open output stream: {e}")))?,
+            cpal::SampleFormat::U32 => device
+                .build_output_stream::<u32, _, _>(
+                    stream_config,
+                    {
+                        let mut sink = SinkLogicShim::from(sink);
+                        move |data: &mut [u32], _: &cpal::OutputCallbackInfo| sink.fill_u32(data)
+                    },
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open output stream: {e}")))?,
+            cpal::SampleFormat::U8 => device
+                .build_output_stream::<u8, _, _>(
+                    stream_config,
+                    {
+                        let mut sink = SinkLogicShim::from(sink);
+                        move |data: &mut [u8], _: &cpal::OutputCallbackInfo| sink.fill_u8(data)
                     },
                     err_cb,
                     None,
@@ -349,8 +421,8 @@ impl Drop for Player {
     }
 }
 
-/// Thin adapter so the i16 device path can reuse `SinkLogic` through a
-/// scratch buffer (converted per callback; i16 outputs are not the
+/// Thin adapter so integer device paths can reuse `SinkLogic` through a
+/// scratch buffer (converted per callback; integer outputs are not the
 /// studio path).
 struct SinkLogicShim {
     inner: SinkLogic,
@@ -367,12 +439,46 @@ impl From<SinkLogic> for SinkLogicShim {
 }
 
 impl SinkLogicShim {
-    fn fill_i16(&mut self, data: &mut [i16]) {
+    /// Fill the scratch buffer with f32 and convert to the device type.
+    fn scratch_fill(&mut self, len: usize) -> &[f32] {
         self.scratch.clear();
-        self.scratch.resize(data.len(), 0.0);
+        self.scratch.resize(len, 0.0);
         self.inner.fill(&mut self.scratch);
-        for (dst, &src) in data.iter_mut().zip(&self.scratch) {
+        &self.scratch
+    }
+
+    fn fill_i16(&mut self, data: &mut [i16]) {
+        let s = self.scratch_fill(data.len());
+        for (dst, &src) in data.iter_mut().zip(s) {
             *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
+        }
+    }
+
+    fn fill_i32(&mut self, data: &mut [i32]) {
+        let s = self.scratch_fill(data.len());
+        for (dst, &src) in data.iter_mut().zip(s) {
+            *dst = (src.clamp(-1.0, 1.0) * 2147483647.0) as i32;
+        }
+    }
+
+    fn fill_u16(&mut self, data: &mut [u16]) {
+        let s = self.scratch_fill(data.len());
+        for (dst, &src) in data.iter_mut().zip(s) {
+            *dst = ((src.clamp(-1.0, 1.0) + 1.0) * 32767.5) as u16;
+        }
+    }
+
+    fn fill_u32(&mut self, data: &mut [u32]) {
+        let s = self.scratch_fill(data.len());
+        for (dst, &src) in data.iter_mut().zip(s) {
+            *dst = ((src.clamp(-1.0, 1.0) + 1.0) * 2147483647.5) as u32;
+        }
+    }
+
+    fn fill_u8(&mut self, data: &mut [u8]) {
+        let s = self.scratch_fill(data.len());
+        for (dst, &src) in data.iter_mut().zip(s) {
+            *dst = ((src.clamp(-1.0, 1.0) + 1.0) * 127.5) as u8;
         }
     }
 }
@@ -474,37 +580,16 @@ fn bump_generation(shared: &Shared, fed_since_bump: &mut u64, base_samples: u64)
     shared.base.store(base_samples, Ordering::Release);
 }
 
-/// Resample (rate) and up/down-mix (channels) the source to what the
-/// device wants. No-op when both already match.
+/// Adapt source audio to the device's rate and channel count — the
+/// shared, generalized [`crate::channels::adapt`] (BUG 3 widening:
+/// v1.0.0 supported only mono↔stereo here; multichannel devices now
+/// play).
 fn adapt_to_device(
     audio: &InterleavedAudio,
     device_rate: u32,
     device_channels: u16,
 ) -> Result<InterleavedAudio> {
-    let rate_matched = crate::resample::resample(audio, device_rate)?;
-    if rate_matched.channels == device_channels {
-        return Ok(rate_matched);
-    }
-    let frames = rate_matched.frames();
-    let src_ch = rate_matched.channels as usize;
-    let mut mixed = Vec::with_capacity(frames * device_channels as usize);
-    for f in 0..frames {
-        let frame = &rate_matched.data[f * src_ch..(f + 1) * src_ch];
-        match (src_ch, device_channels) {
-            (1, 2) => {
-                mixed.push(frame[0]);
-                mixed.push(frame[0]);
-            }
-            (2, 1) => mixed.push((frame[0] + frame[1]) * 0.5),
-            _ => {
-                return Err(Error::Device(format!(
-                    "unsupported channel adaptation: {} source -> {} device channels",
-                    src_ch, device_channels
-                )));
-            }
-        }
-    }
-    InterleavedAudio::new(mixed, device_rate, device_channels)
+    crate::channels::adapt(audio, device_rate, device_channels)
 }
 
 #[cfg(test)]

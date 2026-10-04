@@ -12,6 +12,8 @@
 //! rate conversion, `recorder` — 192 kHz/32-bit capture, `player` +
 //! `transport` — playback with play/pause/stop/seek.
 
+pub mod channels;
+pub mod devices;
 mod error;
 pub mod mp3;
 pub mod player;
@@ -20,6 +22,7 @@ pub mod resample;
 pub mod transport;
 pub mod wav;
 
+pub use devices::{DeviceInfo, DeviceInventory};
 pub use error::{Error, Result};
 pub use mp3::{Mp3Bitrate, Mp3Settings, VbrQuality};
 pub use player::{Player, PlayerCommand};
@@ -82,19 +85,76 @@ impl InterleavedAudio {
     }
 }
 
-/// Import an audio file, auto-detecting the format from extension and
-/// content. WAV via hound (with a symphonia fallback for exotic RIFF
-/// dialects), MP3 via symphonia.
+/// Hard ceiling on imported (decoded) audio: 512 Mi frames-worth of f32
+/// sample data ≈ 2 GiB. Files that would decode larger are refused with
+/// a clear message instead of dragging the machine into an OOM kill —
+/// the app must never crash (BUG 4). For scale: 3 h of stereo 44.1 kHz
+/// is ~0.95 G samples and still imports; pathological multi-hour
+/// high-rate material belongs in the disk-streamed *recording* path.
+pub const MAX_IMPORT_SAMPLES: u64 = 512 * 1024 * 1024;
+
+/// Reject absurdly large files **before** decoding, using the on-disk
+/// size as a proxy (BUG 2 hardening: a truncated read of a 20 GiB WAV
+/// header must not start a decode that can only end in OOM).
 ///
-/// # Errors
-/// [`Error::UnsupportedFormat`] for anything that is neither RIFF/WAVE nor
-/// MPEG audio, plus decoder errors from the underlying libraries.
-pub fn import(path: &std::path::Path) -> Result<InterleavedAudio> {
+/// Bounds used (decoded f32 bytes vs file bytes, worst case per format):
+/// WAV: `×4` (8-bit PCM decodes to 32-bit floats), MP3: `×8`
+/// (32 kbps mono 8 kHz expands ~8×).
+fn guard_import_size(path: &std::path::Path) -> Result<()> {
+    const MAX_BYTES: u64 = MAX_IMPORT_SAMPLES * 4;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| Error::io(format!("read metadata of '{}'", path.display()), e))?;
+    if !meta.is_file() {
+        return Err(Error::UnsupportedFormat(format!(
+            "'{}' is not a regular file",
+            path.display()
+        )));
+    }
+    let size = meta.len();
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    match ext.as_str() {
+    // Worst-case decoded-f32 growth per on-disk byte:
+    // WAV ×4 (8-bit PCM → 32-bit float), MP3 ×8 (32 kbps mono 8 kHz),
+    // unknown extensions sniffed as either — keep the pessimistic 8×.
+    let expansion: u64 = match ext.as_str() {
+        "wav" | "wave" => 4,
+        _ => 8,
+    };
+    let bound = size.saturating_mul(expansion);
+    if bound > MAX_BYTES {
+        return Err(Error::UnsupportedFormat(format!(
+            "'{}' is too large to import ({:.2} GiB on disk; decoded audio would exceed the {:.0} GiB safety limit). \
+             Import a shorter file, or record it directly in Micro-Vocal Lab (recordings stream to disk \
+             and have no length limit).",
+            path.display(),
+            size as f64 / (1024.0 * 1024.0 * 1024.0),
+            MAX_BYTES as f64 / (1024.0 * 1024.0 * 1024.0),
+        )));
+    }
+    Ok(())
+}
+
+/// Import an audio file, auto-detecting the format from extension and
+/// content. WAV via hound (with a symphonia fallback for exotic RIFF
+/// dialects), MP3 via symphonia.
+///
+/// Never panics on user files: empty files, zero-frame files, corrupt
+/// headers and oversize files all return typed errors (BUG 2 regression
+/// surface).
+///
+/// # Errors
+/// [`Error::UnsupportedFormat`] for anything that is neither RIFF/WAVE nor
+/// MPEG audio, for empty/zero-frame files, and for files too large to
+/// import; plus decoder errors from the underlying libraries.
+pub fn import(path: &std::path::Path) -> Result<InterleavedAudio> {
+    guard_import_size(path)?;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let audio = match ext.as_str() {
         "wav" | "wave" => wav::import(path)
             .or_else(|e| mp3::import_any(path).map(|(audio, _)| audio).map_err(|_| e)),
         "mp3" => mp3::import(path),
@@ -105,11 +165,26 @@ pub fn import(path: &std::path::Path) -> Result<InterleavedAudio> {
             } else if wav::looks_like_wav(path)? {
                 wav::import(path)
             } else {
-                Err(Error::UnsupportedFormat(format!(
+                return Err(Error::UnsupportedFormat(format!(
                     "'{}' is not a supported audio format (WAV or MP3)",
                     path.display()
-                )))
+                )));
             }
         }
+    }?;
+    if audio.frames() == 0 {
+        return Err(Error::UnsupportedFormat(format!(
+            "'{}' contains no audio frames (empty or header-only file)",
+            path.display()
+        )));
     }
+    if audio.data.len() as u64 > MAX_IMPORT_SAMPLES {
+        return Err(Error::UnsupportedFormat(format!(
+            "'{}' decodes to {:.2} GiB of audio, above the {:.0} GiB import limit",
+            path.display(),
+            audio.data.len() as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0),
+            MAX_IMPORT_SAMPLES as f64 * 4.0 / (1024.0 * 1024.0 * 1024.0),
+        )));
+    }
+    Ok(audio)
 }

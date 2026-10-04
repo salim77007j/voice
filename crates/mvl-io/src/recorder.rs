@@ -46,16 +46,50 @@ impl Default for RecordRequest {
     }
 }
 
-/// Sample formats the recorder can consume (subset of cpal's formats that
-/// cover effectively every microphone on all three platforms).
+/// Sample formats the recorder can consume (every format cpal exposes on
+/// the three desktop platforms — v1.0.0 only handled F32/I16/U16 and
+/// *refused to record* on devices that offered anything else, e.g. ALSA
+/// S32-only hardware or exclusive-mode WASAPI i32 endpoints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFmt {
     /// 32-bit IEEE float — the studio path, no conversion needed.
     F32,
     /// 16-bit signed integer — converted in the callback (÷ 32768).
     I16,
+    /// 32-bit signed integer — converted in the callback (÷ 2³¹).
+    I32,
     /// 16-bit unsigned integer — converted in the callback (bias 32768).
     U16,
+    /// 32-bit unsigned integer — converted in the callback (bias 2³¹).
+    U32,
+    /// 8-bit unsigned integer (RIFF convention) — bias 128.
+    U8,
+}
+
+impl SampleFmt {
+    /// Every format, in negotiation-preference order.
+    pub const ALL: [SampleFmt; 6] = [
+        SampleFmt::F32,
+        SampleFmt::I16,
+        SampleFmt::I32,
+        SampleFmt::U16,
+        SampleFmt::U32,
+        SampleFmt::U8,
+    ];
+
+    /// Map a cpal sample format onto ours, if supported.
+    #[must_use]
+    pub fn from_cpal(f: cpal::SampleFormat) -> Option<Self> {
+        match f {
+            cpal::SampleFormat::F32 => Some(Self::F32),
+            cpal::SampleFormat::I16 => Some(Self::I16),
+            cpal::SampleFormat::I32 => Some(Self::I32),
+            cpal::SampleFormat::U16 => Some(Self::U16),
+            cpal::SampleFormat::U32 => Some(Self::U32),
+            cpal::SampleFormat::U8 => Some(Self::U8),
+            _ => None,
+        }
+    }
 }
 
 /// One capability range a device offers (mirrors cpal's
@@ -100,12 +134,13 @@ pub struct NegotiatedConfig {
 /// 3. The best F32 range at/above 44.1 kHz: the highest rate that is
 ///    `>= 44_100`, capped at the requested rate, at the best channel
 ///    match.
-/// 4. Same as 1–3 but for I16, then U16 (integer-only devices).
+/// 4. Same as 1–3 for every other supported format, in preference order
+///    (I16, I32, U16, U32, U8) — integer-only devices must still record.
 ///
 /// Returns `None` when no range offers at least 44.1 kHz — the caller
 /// then falls back to the device's default config or reports an error.
 pub fn negotiate(ranges: &[ConfigRange], request: &RecordRequest) -> Option<NegotiatedConfig> {
-    for &format in &[SampleFmt::F32, SampleFmt::I16, SampleFmt::U16] {
+    for &format in &SampleFmt::ALL {
         // Exact rate + channel match.
         if let Some(r) = ranges.iter().find(|r| {
             r.format == format
@@ -216,17 +251,58 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Start recording from the default input device into `path`.
+    /// Start recording, trying every input device on every host until
+    /// one actually opens a stream (BUG 1 fix).
+    ///
+    /// Fallback order (via [`crate::devices`]):
+    /// 1. the default host's default input device,
+    /// 2. default input devices of other hosts,
+    /// 3. every other input device.
+    ///
+    /// Each candidate is *fully opened* (capability query → negotiate →
+    /// stream build → `play()`); the first candidate that completes wins.
+    /// Devices that fail are skipped, and the failure that got the
+    /// furthest is preserved for the error message when they all fail.
     ///
     /// # Errors
-    /// * [`Error::Device`] — no input device, or stream construction failed
+    /// * [`Error::Device`] — no input device opened (message includes a
+    ///   machine inventory + platform-specific hints)
     /// * [`Error::Io`] / [`Error::Wav`] — target file problems
     pub fn start(path: &Path, request: RecordRequest) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| Error::Device("no default input device found".into()))?;
-        Self::start_on(&device, path, request)
+        let inv = crate::devices::list();
+        let default_host = cpal::default_host().id().name().to_string();
+        let candidates = crate::devices::fallback_order(&inv.inputs, &default_host);
+
+        let mut last_err: Option<Error> = None;
+        for cand in candidates {
+            let dev = match crate::devices::open_by_id(&cand.id()) {
+                Ok(d) => d,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            match Self::start_on(&dev, path, request) {
+                Ok(rec) => return Ok(rec),
+                Err(e) => {
+                    eprintln!(
+                        "mvl-io: input device '{}' failed to open, trying next: {e}",
+                        cand.label()
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(match last_err {
+            Some(e) if inv.inputs.len() <= 1 => e,
+            // Multiple candidates all failed: wrap with context so the
+            // user knows *everything* was tried, not just one device.
+            Some(e) => Error::Device(format!(
+                "tried {} input device(s); last failure: {e}",
+                inv.inputs.len()
+            )),
+            None => crate::devices::no_input_device_error(&inv),
+        })
     }
 
     /// Start recording from a specific device.
@@ -238,12 +314,7 @@ impl Recorder {
             .supported_input_configs()
             .map_err(|e| Error::Device(format!("query device capabilities: {e}")))?
             .filter_map(|r| {
-                let format = match r.sample_format() {
-                    cpal::SampleFormat::F32 => SampleFmt::F32,
-                    cpal::SampleFormat::I16 => SampleFmt::I16,
-                    cpal::SampleFormat::U16 => SampleFmt::U16,
-                    _ => return None,
-                };
+                let format = SampleFmt::from_cpal(r.sample_format())?;
                 Some(ConfigRange {
                     min_rate: r.min_sample_rate(),
                     max_rate: r.max_sample_rate(),
@@ -259,16 +330,23 @@ impl Recorder {
                 // back to whatever the device calls its default, as long as
                 // it speaks a format we understand.
                 let default = device.default_input_config().ok()?;
-                let format = match default.sample_format() {
-                    cpal::SampleFormat::F32 => SampleFmt::F32,
-                    cpal::SampleFormat::I16 => SampleFmt::I16,
-                    cpal::SampleFormat::U16 => SampleFmt::U16,
-                    _ => return None,
-                };
+                let format = SampleFmt::from_cpal(default.sample_format())?;
                 Some(NegotiatedConfig {
                     sample_rate: default.sample_rate(),
                     channels: default.channels(),
                     format,
+                })
+            })
+            .or_else(|| {
+                // Last resort: the device exposes *some* input config we
+                // can consume even if it is below studio rate — an 8/16/
+                // 22.05 kHz capture beats refusing to record. `min_rate`
+                // is always inside the range by construction.
+                let first = ranges.first()?;
+                Some(NegotiatedConfig {
+                    sample_rate: first.min_rate,
+                    channels: first.channels,
+                    format: first.format,
                 })
             })
             .ok_or_else(|| {
@@ -330,11 +408,41 @@ impl Recorder {
                     None,
                 )
                 .map_err(|e| Error::Device(format!("open input stream: {e}")))?,
+            SampleFmt::I32 => device
+                .build_input_stream::<i32, _, _>(
+                    stream_config,
+                    input_callback(producer, frames.clone(), dropped.clone(), |s| {
+                        s as f32 / 2147483648.0
+                    }),
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open input stream: {e}")))?,
             SampleFmt::U16 => device
                 .build_input_stream::<u16, _, _>(
                     stream_config,
                     input_callback(producer, frames.clone(), dropped.clone(), |s| {
                         (f32::from(s) - 32768.0) / 32768.0
+                    }),
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open input stream: {e}")))?,
+            SampleFmt::U32 => device
+                .build_input_stream::<u32, _, _>(
+                    stream_config,
+                    input_callback(producer, frames.clone(), dropped.clone(), |s| {
+                        (s as f32 - 2147483648.0) / 2147483648.0
+                    }),
+                    err_cb,
+                    None,
+                )
+                .map_err(|e| Error::Device(format!("open input stream: {e}")))?,
+            SampleFmt::U8 => device
+                .build_input_stream::<u8, _, _>(
+                    stream_config,
+                    input_callback(producer, frames.clone(), dropped.clone(), |s| {
+                        (f32::from(s) - 128.0) / 128.0
                     }),
                     err_cb,
                     None,
