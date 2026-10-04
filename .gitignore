@@ -1,3 +1,6 @@
 target/
 *.lock.tmp
 .DS_Store
+
+# on-device selftest evidence (big WAVs, local only)
+mvl-selftest/

@@ -5,6 +5,9 @@
 //! * `process <in> <out> [options]` — headless DSP render (Phase 3 CLI)
 //! * `screenshot <out.png> [file] [options]` — offscreen UI render for
 //!   verification (the same UI code, software renderer, no display needed)
+//! * `selftest [--seconds N] [DIR]` — on-device verification kit (Phase 5):
+//!   records from the real input, plays through the real engine, exports,
+//!   renders EN/AR screenshots, writes a PASS/FAIL report
 //! * `self-check` — boot diagnostics
 
 use mvl_app::{controller::Controller, headless};
@@ -16,6 +19,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("process") => process_command(&args[2..]),
         Some("screenshot") => screenshot_command(&args[2..]),
+        Some("selftest") => selftest_command(&args[2..]),
         Some("self-check") => self_check(),
         Some("run") => run_command(&args[2..]),
         Some("--help") | Some("-h") | Some("help") => usage(),
@@ -32,6 +36,7 @@ fn usage() {
              micro-vocal-lab process IN OUT [--pitch ST] [--air %] [--tract MM] [--profile preview|render]\n\
              micro-vocal-lab screenshot OUT.png [FILE] [--pitch ST] [--air %] [--tract MM]\n\
                                             [--locale en|ar] [--width PX] [--height PX] [--playhead SEC]\n\
+             micro-vocal-lab selftest [--seconds N] [DIR]\n\
              micro-vocal-lab self-check",
         env!("CARGO_PKG_VERSION")
     );
@@ -188,7 +193,44 @@ fn screenshot_command(args: &[String]) {
 }
 
 // ---------------------------------------------------------------------------
-// process — headless DSP render (unchanged from Phase 3)
+// selftest — on-device verification kit (Phase 5, see docs/ONDEVICE.md)
+// ---------------------------------------------------------------------------
+
+fn selftest_command(args: &[String]) {
+    let mut seconds = 5u32;
+    let mut dir: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seconds" => {
+                i += 1;
+                match args.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                    Some(v) if (1..=60).contains(&v) => seconds = v,
+                    _ => {
+                        eprintln!("error: --seconds needs a number 1..=60");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            other if dir.is_none() && !other.starts_with("--") => dir = Some(other.to_string()),
+            other => {
+                eprintln!("error: unexpected argument '{other}'");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let out_dir = std::path::PathBuf::from(dir.unwrap_or_else(|| "mvl-selftest".into()));
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("error: cannot create {}: {e}", out_dir.display());
+        std::process::exit(1);
+    }
+    let code = mvl_app::selftest::run(seconds, &out_dir);
+    std::process::exit(code);
+}
+
+// ---------------------------------------------------------------------------
+// self-check — boot diagnostics
 // ---------------------------------------------------------------------------
 
 fn self_check() {
@@ -214,7 +256,7 @@ fn self_check() {
     );
     let slint_version = "1.18.1";
     println!("ui: slint {slint_version} (fluent-dark, embedded IBM Plex, EN/ar + RTL)");
-    println!("usage: micro-vocal-lab [run|process|screenshot|self-check] ...");
+    println!("usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...");
 }
 
 /// Smoke render used by the boot self-check.

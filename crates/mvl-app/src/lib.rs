@@ -11,6 +11,8 @@
 //! * [`waveform`] — peak mipmap, offscreen waveform rendering, ruler ticks,
 //!   zoom math
 //! * [`preview`] — real-time preview player (streaming engine → cpal)
+//! * [`selftest`] — on-device verification kit (Phase 5): one command that
+//!   exercises real hardware paths and collects evidence
 //! * [`session`] — audio session model (import / record / export)
 //! * [`controller`] — wires the Slint window to the session + player
 //! * [`headless`] — offscreen platform for tests and screenshot rendering
@@ -21,5 +23,6 @@ pub mod controller;
 pub mod format;
 pub mod headless;
 pub mod preview;
+pub mod selftest;
 pub mod session;
 pub mod waveform;
