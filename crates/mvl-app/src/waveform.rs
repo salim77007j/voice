@@ -9,8 +9,8 @@
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 /// Colour constants kept in lockstep with `ui/theme.slint`.
-const PEAK: [u8; 4] = [45, 212, 191, 255]; // #2DD4BF
-const RMS: [u8; 4] = [45, 212, 191, 140]; // #2DD4BF @55 %
+const PEAK: [u8; 4] = [74, 144, 226, 255]; // #4A90E2 (audio-data blue)
+const RMS: [u8; 4] = [74, 144, 226, 140]; // #4A90E2 @55 %
 const CENTER: [u8; 4] = [255, 255, 255, 10]; // subtle center guide
 /// All-zero RGBA (used by tests to assert untouched pixels).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -281,15 +281,22 @@ fn draw_column(
     let max_y = height as i64 - 1;
     let half = half.max(0.0);
 
-    // RMS body (55 % teal) from −rms..+rms
+    // RMS body from −rms..+rms: alpha fades from 190 at the center line
+    // to 60 at the body edge — the analog "weight near the baseline"
+    // look (Phase 7.2) instead of a flat solid fill.
     let r = (f64::from(rms.clamp(-1.0, 1.0).abs()) * half).round() as i64;
     let body_top = (cy as i64 - r).clamp(0, max_y) as usize;
     let body_bot = (cy as i64 + r).clamp(0, max_y) as usize;
     for y in body_top..=body_bot {
-        put(px, stride, x, y, RMS);
+        // 0 at the center, 1 at the body edge
+        let t = (y as f64 - cy).abs() / r.max(1) as f64;
+        let alpha = 190.0 - 130.0 * t.clamp(0.0, 1.0);
+        let mut px_rgba = RMS;
+        px_rgba[3] = alpha.round() as u8;
+        put(px, stride, x, y, px_rgba);
     }
 
-    // peak outline (full teal): lo/hi map to rows, clamped to the canvas
+    // peak outline (full blue): lo/hi map to rows, clamped to the canvas
     let top =
         ((cy - f64::from(hi.clamp(-1.0, 1.0)) * half).round() as i64).clamp(0, max_y) as usize;
     let bot =
@@ -495,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn render_is_deterministic_and_teal() {
+    fn render_is_deterministic_and_blue() {
         let m = PeakMipmap::build(&sine(48_000, 440.0, 48_000.0), 1);
         let a = render_waveform_buffer(&m, 1, 0, 48_000, 400, 200, 48_000);
         let b = render_waveform_buffer(&m, 1, 0, 48_000, 400, 200, 48_000);
@@ -505,15 +512,17 @@ mod tests {
         let bb = b.as_bytes().to_vec();
         assert_eq!(ba, bb);
 
-        // background transparent at the very top, wave pixels teal-ish in
+        // background transparent at the very top, wave pixels blue-ish in
         // the middle band: sample a column near the loud centre
         let stride = 400 * 4;
         let top = &ba[0..4];
         assert_eq!(top, TRANSPARENT, "top corner must be transparent");
         let mid = &ba[100 * stride + 200 * 4..100 * stride + 200 * 4 + 4];
-        // at the centre line we either drew the guide or the body
+        // at the centre line we either drew the guide, the body (gradient
+        // alpha 190 at the centre) or the peak outline
+        let rms_center = [RMS[0], RMS[1], RMS[2], 190];
         assert!(
-            mid == CENTER || mid == RMS || mid == PEAK,
+            mid == CENTER || mid == rms_center || mid == PEAK,
             "centre pixel should be part of the trace, got {mid:?}"
         );
     }
@@ -525,12 +534,12 @@ mod tests {
         let img = render_waveform_buffer(&m, 1, 0, 16, 100, 100, 48_000);
         assert_eq!((img.width(), img.height()), (100, 100));
         let bytes = img.as_bytes();
-        // the drawn stems must contain teal pixels
+        // the drawn stems must contain blue pixels
         assert!(
             bytes
                 .chunks_exact(4)
                 .any(|p| p[0] == PEAK[0] && p[1] == PEAK[1]),
-            "stem plot must draw teal pixels"
+            "stem plot must draw blue pixels"
         );
     }
 

@@ -1,0 +1,145 @@
+// Rack-mount chrome (Phase 7.2, Audioprecise Pro reference): machined
+// panels with corner screws, engraved section labels, and status LEDs.
+// Pure decoration — zero interaction, zero state.
+
+import { Theme } from "../theme.slint";
+import { Translations } from "../translations.slint";
+
+// One Phillips screw head. Place with x/y from the caller.
+export component ScrewHead inherits Rectangle {
+    width: 9px;
+    height: 9px;
+    border-radius: 4.5px;
+    background: @radial-gradient(circle at self.width * 0.38 self.height * 0.32, #7D848D 0%, #4A5056 45%, #2A2D32 100%);
+    border-width: 1px;
+    border-color: #0B0D0FC0;
+
+    // the slot, slightly off-axis so no two screws read identical
+    Rectangle {
+        width: 71%;
+        height: 1.5px;
+        border-radius: 0.75px;
+        background: #0A0C0E;
+        transform-rotation: 31deg;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+    // light catch on the rim
+    Rectangle {
+        width: 60%; height: 1.5px;
+        x: parent.width * 0.18; y: 1px;
+        border-radius: 0.75px;
+        background: #FFFFFF3C;
+    }
+}
+
+// Machined rack panel: gunmetal surface, tight radius, top bevel light,
+// bottom shadow, optional corner screws and an engraved label strip.
+export component RackPanel inherits Rectangle {
+    // show the four corner screws (nameplate, analysis, dialogs)
+    in property <bool> screws: false;
+    // engraved section label (empty = no label row)
+    in property <string> label: "";
+    // extra height reserved by the label row (consumers place content
+    // below `content-y`)
+    out property <length> content-y: root.label == "" ? 0px : 22px;
+
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-panel;
+
+    // machined bevel: light top edge, dark bottom edge
+    Rectangle {
+        x: 1px; y: 1px;
+        width: parent.width - 2px;
+        height: 1px;
+        background: #FFFFFF14;
+    }
+    Rectangle {
+        x: 1px; y: parent.height - 2px;
+        width: parent.width - 2px;
+        height: 1px;
+        background: #00000066;
+    }
+
+    if root.screws: ScrewHead { x: 6px;    y: 6px; }
+    if root.screws: ScrewHead { x: parent.width - self.width - 6px; y: 6px; }
+    if root.screws: ScrewHead { x: 6px;    y: parent.height - self.height - 6px; }
+    if root.screws: ScrewHead { x: parent.width - self.width - 6px; y: parent.height - self.height - 6px; }
+
+    if root.label != "": Text {
+        text: root.label;
+        color: Theme.text-muted;
+        font-family: Theme.font-mono;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 1.4px;
+        x: Theme.space-3;
+        y: 4px;
+        width: parent.width - 2 * Theme.space-3;
+        height: 16px;
+        vertical-alignment: TextVerticalAlignment.center;
+        overflow: elide;
+    }
+}
+
+// Status LED: lit = colored with glow, off = dark dome.
+export component LedDot inherits Rectangle {
+    in property <color> led-color: Theme.accent;
+    in property <bool> lit: false;
+    in property <length> d: 7px;
+
+    width: root.d;
+    height: root.d;
+    border-radius: root.d / 2;
+
+    // glow halo
+    if root.lit: Rectangle {
+        width: parent.width * 2.2;
+        height: parent.height * 2.2;
+        border-radius: self.width / 2;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: @radial-gradient(circle, root.led-color 0%, transparent 70%);
+        opacity: 0.45;
+    }
+
+    background: root.lit
+        ? @radial-gradient(circle at self.width * 0.35 self.height * 0.30, #FFFFFFCC 0%, root.led-color 45%, root.led-color 100%)
+        : @radial-gradient(circle at self.width * 0.35 self.height * 0.30, #3A3F45 0%, #16181B 80%);
+    border-width: 1px;
+    border-color: #0E1013AA;
+}
+
+// Recessed display well: near-black interior with an inner shadow rim —
+// the "set into the panel" look for waveform / spectrum / value readouts.
+export component DisplayWell inherits Rectangle {
+    background: Theme.recess;
+    border-width: 1px;
+    border-color: #0D0F12;         // outer shadow rim
+    border-radius: Theme.radius-control;
+
+    // inner top shadow (depth), thin light bottom edge (glass catch)
+    Rectangle {
+        x: 1px; y: 1px;
+        width: parent.width - 2px;
+        height: 2px;
+        background: #00000088;
+    }
+    Rectangle {
+        x: 1px; y: parent.height - 2px;
+        width: parent.width - 2px;
+        height: 1px;
+        background: #FFFFFF0F;
+    }
+}
+
+// Small engraved caption (section labels inside panels, meter labels).
+export component EngravedLabel inherits Text {
+    color: Theme.text-muted;
+    font-family: Theme.font-mono;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1.0px;
+}

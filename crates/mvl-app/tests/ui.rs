@@ -35,6 +35,11 @@ fn make_controller() -> Controller {
     Controller::new(app)
 }
 
+/// Blue-dominant pixel (waveform trace blended over the dark panel).
+fn is_blue(p: (u8, u8, u8)) -> bool {
+    i32::from(p.2) > 90 && i32::from(p.2) > i32::from(p.0) + 30
+}
+
 #[test]
 fn initial_state_is_empty_and_english() {
     let c = make_controller();
@@ -185,6 +190,18 @@ fn screenshot_renders_real_pixels_en_and_ar() {
         let app = c.window();
         app.set_playhead(0.4);
         app.set_show_playhead(true);
+        // One honest UI tick: the analysis rack must publish real data
+        // (40 RTA bands + peak caps + L/R levels) for the playhead window.
+        c.refresh();
+        let bands = app.get_spectrum_bands();
+        assert_eq!(bands.iter().count(), 40, "RTA model must hold 40 bands");
+        let lit = bands.iter().filter(|&b| b > 0.01).count();
+        assert!(
+            lit >= 3,
+            "voiced material at the playhead must light RTA bands (got {lit})"
+        );
+        assert!(app.get_level_l() > 0.0, "master meter must register signal");
+        assert!(!app.get_clip_latch(), "-6 dBFS material must not clip");
         let out = dir.join("ui-en.png");
         headless::render_to_png(app, slint::PhysicalSize::new(1280, 800), &out).unwrap();
         assert!(
@@ -192,7 +209,10 @@ fn screenshot_renders_real_pixels_en_and_ar() {
             "PNG must be written with real content"
         );
 
-        // pixel truth: the design tokens must actually be rendered
+        // pixel truth: the Phase 7.2 rack design tokens must be rendered.
+        // Layout at 1280×800: 6px outer padding (bg-base #1A1D21), then
+        // nameplate (52px), waveform rack (stretch), main row (292px),
+        // transport (60px), status bar (26px).
         let buf = headless::render_to_buffer(app, slint::PhysicalSize::new(1280, 800));
         assert_eq!((buf.width(), buf.height()), (1280, 800));
         let px = buf.as_bytes();
@@ -200,21 +220,35 @@ fn screenshot_renders_real_pixels_en_and_ar() {
             let o = ((y * 1280 + x) * 3) as usize;
             (px[o], px[o + 1], px[o + 2])
         };
-        // toolbar background (panel #1C1E24) at the top-left
-        assert_eq!(at(4, 4), (28, 30, 36), "toolbar must be panel-coloured");
-        // waveform panel, trace or 55 % RMS blend mid-canvas
-        let mid = at(640, 400);
+        // outer padding is app background #1A1D21 at the very corner
+        assert_eq!(at(4, 4), (26, 29, 33), "corner must be bg-base #1A1D21");
+        // status bar interior is #1E2126 (bottom strip)
+        let status = at(640, 789);
         assert!(
-            mid == (28, 30, 36)            // panel
-                || mid == (45, 212, 191)   // peak outline
-                || mid == (36, 129, 120), // RMS body blended over panel
-            "canvas must be panel or waveform-coloured, got {mid:?}"
+            (status.0 as i32 - 30).abs() <= 2
+                && (status.1 as i32 - 33).abs() <= 2
+                && (status.2 as i32 - 38).abs() <= 2,
+            "status bar must be #1E2126, got {status:?}"
         );
-        // accent teal must exist somewhere (module values, playhead, thumb)
-        let teal = px
+        // waveform rack interior: panel #242729, the blue trace #4A90E2,
+        // or the gradient RMS body (alpha 60..190 over panel) — a
+        // blue-dominant pixel in all cases, never a stray colour.
+        let mid = at(640, 230);
+        assert!(
+            mid == (36, 39, 41) || mid == (74, 144, 226) || is_blue(mid),
+            "waveform canvas must be panel or trace-coloured, got {mid:?}"
+        );
+        // gold accent #E6B800 must exist (fader fills, knob indicators —
+        // solid rectangles, not antialiased text)
+        let gold = px
             .chunks_exact(3)
-            .any(|p| p[0] == 45 && p[1] == 212 && p[2] == 191);
-        assert!(teal, "accent #2DD4BF must appear in the render");
+            .any(|p| p[0] == 230 && p[1] == 184 && p[2] == 0);
+        assert!(gold, "accent #E6B800 must appear in the render");
+        // blue audio-data trace must exist
+        let blue = px
+            .chunks_exact(3)
+            .any(|p| p[0] == 74 && p[1] == 144 && p[2] == 226);
+        assert!(blue, "waveform blue #4A90E2 must appear in the render");
     }
 
     // Arabic / RTL
@@ -232,7 +266,7 @@ fn screenshot_renders_real_pixels_en_and_ar() {
             let o = ((y * 1280 + x) * 3) as usize;
             (px[o], px[o + 1], px[o + 2])
         };
-        // panel background still dominates the chrome
-        assert_eq!(at(4, 4), (28, 30, 36));
+        // outer padding still dominates the corner in RTL
+        assert_eq!(at(4, 4), (26, 29, 33));
     }
 }

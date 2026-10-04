@@ -40,10 +40,18 @@ export component WaveformView inherits Rectangle {
     out property <length> canvas-width: canvas.width;
     out property <length> canvas-height: canvas.height;
 
-    background: Theme.panel;
+    background: Theme.recess;   // sunken display well (Phase 7.2 rack look)
     clip: true;
 
     property <length> ruler-height: 24px;
+
+    // inner top shadow — the recessed depth cue
+    Rectangle {
+        x: 0; y: root.ruler-height;
+        width: parent.width;
+        height: 4px;
+        background: @linear-gradient(180deg, #000000AA 0%, #00000000 100%);
+    }
 
     // ---- time ruler -----------------------------------------------------
     Rectangle {
@@ -125,14 +133,14 @@ export component WaveformView inherits Rectangle {
             width: 2px;
             background: Theme.accent;
             drop-shadow-blur: 8px;
-            drop-shadow-color: #2DD4BF88;
+            drop-shadow-color: #E6B80088;
         }
         Rectangle {
             visible: root.show-playhead;
             x: parent.width * ((root.playhead - root.view-start) / (root.view-end - root.view-start)) - self.width / 2;
             y: 0; height: parent.height;
             width: 22px;
-            background: @linear-gradient(90deg, #2DD4BF00 0%, #2DD4BF2E 50%, #2DD4BF00 100%);
+            background: @linear-gradient(90deg, #E6B80000 0%, #E6B8002E 50%, #E6B80000 100%);
         }
 
         // hover crosshair

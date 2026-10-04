@@ -1,0 +1,116 @@
+// RTA spectrum analyzer display (Phase 7.2): 40 log-spaced bands
+// (20 Hz … 20 kHz, band layout from mvl-core::spectrum) rendered as blue
+// bars in a recessed well, with white peak-hold caps, a subtle grid and
+// engraved frequency marks. All data flows in from the controller at the
+// UI tick rate — the widget itself is stateless.
+
+import { Theme } from "../theme.slint";
+import { EngravedLabel } from "rack.slint";
+
+export component SpectrumView inherits Rectangle {
+    in property <[float]> bands;      // 40 heights 0..1
+    in property <[float]> peaks;      // 40 peak-hold heights 0..1
+    in property <bool> active: false; // dim when no session is loaded
+    in property <string> corner-label: "";
+
+    background: Theme.recess;
+    border-width: 1px;
+    border-color: #0D0F12;
+    border-radius: Theme.radius-control;
+
+    // inner top shadow (recessed depth)
+    Rectangle {
+        x: 1px; y: 1px;
+        width: parent.width - 2px;
+        height: 2px;
+        background: #00000088;
+    }
+
+    // ---- geometry -------------------------------------------------------
+    property <length> bar-gap: 1px;
+    property <int> n-bands: 40;
+    property <length> plot-x: 4px;
+    property <length> plot-w: root.width - 8px;
+    property <length> plot-y: 4px;
+    property <length> plot-h: root.height - 15px;
+    property <length> bar-w: (root.plot-w - root.bar-gap * (root.n-bands - 1)) / root.n-bands;
+
+    function bar-x(i: int) -> length {
+        return root.plot-x + i * (root.bar-w + root.bar-gap);
+    }
+    // log positions over 20 Hz…20 kHz: frac = ln(f/20) / ln(1000)
+    function freq-frac(i: int) -> float {
+        if (i == 0) { return 0.2329; }        // 100 Hz
+        else if (i == 1) { return 0.5; }      // 1 kHz
+        return 0.767;                          // 10 kHz
+    }
+
+    // ---- grid: horizontal level rules + frequency rules ------------------
+    for line[i] in 3: Rectangle {
+        y: root.plot-y + root.plot-h * (i + 1) / 4;
+        x: root.plot-x;
+        width: root.plot-w;
+        height: 1px;
+        background: #FFFFFF09;
+    }
+    for rule[i] in 3: Rectangle {
+        x: root.plot-x + root.plot-w * root.freq-frac(i);
+        y: root.plot-y;
+        width: 1px;
+        height: root.plot-h;
+        background: #FFFFFF0B;
+    }
+
+    // ---- bars -------------------------------------------------------------
+    // Dimmed (not hidden) when no session: a dark analyzer still reads
+    // as "machine waiting", per the rack aesthetic.
+    opacity: root.active ? 1.0 : 0.30;
+
+    for bar[i] in root.bands: Rectangle {
+        x: root.bar-x(i);
+        width: root.bar-w;
+        y: root.plot-y + root.plot-h * (1.0 - bar);
+        height: root.plot-h * bar;
+        border-radius: 1px;
+        background: @linear-gradient(180deg, Theme.spectrum-hi 0%, Theme.spectrum 60%, #1E4FA8 100%);
+    }
+
+    // ---- peak-hold caps -----------------------------------------------------
+    for cap[i] in root.peaks: Rectangle {
+        x: root.bar-x(i);
+        width: root.bar-w;
+        y: root.plot-y + root.plot-h * (1.0 - cap);
+        height: 2px;
+        background: Theme.peak-cap;
+        opacity: cap > 0.01 ? 0.95 : 0.0;
+    }
+
+    // ---- frequency marks ------------------------------------------------------
+    EngravedLabel {
+        text: "100";
+        x: root.plot-x + root.plot-w * root.freq-frac(0) - self.width / 2;
+        y: parent.height - 11px;
+    }
+    EngravedLabel {
+        text: "1k";
+        x: root.plot-x + root.plot-w * root.freq-frac(1) - self.width / 2;
+        y: parent.height - 11px;
+    }
+    EngravedLabel {
+        text: "10k";
+        x: root.plot-x + root.plot-w * root.freq-frac(2) - self.width / 2;
+        y: parent.height - 11px;
+    }
+    EngravedLabel {
+        text: "Hz";
+        x: parent.width - self.width - 6px;
+        y: parent.height - 11px;
+    }
+
+    // ---- corner status ---------------------------------------------------------
+    if root.corner-label != "": EngravedLabel {
+        text: root.corner-label;
+        x: 6px;
+        y: 3px;
+    }
+}

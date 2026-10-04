@@ -1,12 +1,16 @@
-// The precision slider (plan §8.3) — a fully custom Slint component.
+// The precision fader (plan §8.3, rack restyle) — a fully custom Slint
+// component.
 //
+//   · recessed groove track with a hairline shadow rim
 //   · center detent tick at `neutral` (lit when the value sits on it)
 //   · filled portion runs from the neutral point toward the current value
-//   · thumb with focus ring and a drag glow
-//   · click / drag to set; arrow keys step by `step` (1 cent / 0.1 dB / 1 mm),
-//     Shift+arrows by `coarse-step`, Home jumps to neutral,
-//     double-click resets
+//   · metallic fader cap with a gold position line
+//   · click / drag to set; arrow keys step by `step`, Shift+arrows by
+//     `coarse-step`, Home jumps to neutral, double-click resets
 //   · RTL: the track mirrors (fraction maps 1 − x)
+//
+// Interaction code is byte-for-byte the v1.0 logic — only the paint
+// changed in the Phase 7.2 redesign.
 
 import { Theme } from "../theme.slint";
 import { IconReset } from "../icons.slint";
@@ -29,14 +33,15 @@ export component PrecisionSlider inherits Rectangle {
     property <bool> on-neutral: Math.abs(root.value - root.neutral) < 0.000001;
 
     // geometry
-    property <length> thumb-size: 16px;
-    property <length> track-thickness: 6px;
-    property <length> edge-inset: root.thumb-size / 2 + 1px;
+    property <length> thumb-width: 18px;
+    property <length> thumb-height: 20px;
+    property <length> track-thickness: 8px;
+    property <length> edge-inset: root.thumb-width / 2 + 1px;
     property <length> track-x: root.edge-inset;
     property <length> track-w: root.width - 2 * root.edge-inset;
     property <float> neutral-fraction: (root.neutral - root.minimum) / (root.maximum - root.minimum);
 
-    height: 28px;   // comfortable drag target on the 8-pt grid
+    height: 26px;   // comfortable drag target on the 8-pt grid
 
     // ---- helpers --------------------------------------------------------
     // screen fraction (0..1, LTR) -> value, honouring RTL mirroring
@@ -49,22 +54,24 @@ export component PrecisionSlider inherits Rectangle {
         return root.rtl ? 1 - f : f;
     }
 
-    // ---- track ----------------------------------------------------------
+    // ---- track: recessed groove -----------------------------------------
     Rectangle {
         y: (parent.height - root.track-thickness) / 2;
         x: root.track-x; width: root.track-w;
         height: root.track-thickness;
         border-radius: root.track-thickness / 2;
-        background: Theme.raised;
+        background: Theme.recess;
+        border-width: 1px;
+        border-color: #0D0F12;
     }
 
     // center detent tick
     Rectangle {
         x: root.track-x + root.track-w * root.neutral-fraction - self.width / 2;
         y: (parent.height - self.height) / 2;
-        width: 2px; height: 16px;
+        width: 2px; height: 18px;
         border-radius: 1px;
-        background: root.on-neutral ? Theme.accent : Theme.text-muted;
+        background: root.on-neutral ? Theme.accent : Theme.edge;
     }
 
     // filled portion from neutral toward the value
@@ -77,17 +84,33 @@ export component PrecisionSlider inherits Rectangle {
         background: Theme.accent;
     }
 
-    // thumb (with drag glow — the only motion, plan §8.1)
+    // ---- fader cap: machined metal with a gold position line --------------
     Rectangle {
         x: root.track-x + root.track-w * root.fraction - self.width / 2;
         y: (parent.height - self.height) / 2;
-        width: root.thumb-size; height: root.thumb-size;
-        border-radius: self.width / 2;
-        background: Theme.panel;
-        border-width: 2px;
-        border-color: Theme.accent;
-        drop-shadow-blur: ta.pressed ? 10px : 0px;
-        drop-shadow-color: #2DD4BF66;
+        width: root.thumb-width; height: root.thumb-height;
+        border-radius: 3px;
+        background: ta.pressed
+            ? @linear-gradient(180deg, #B8BDC4 0%, #83898F 45%, #4C5157 55%, #2E3238 100%)
+            : @linear-gradient(180deg, #CDD2D8 0%, #93999F 45%, #5A6066 55%, #363A40 100%);
+        border-width: 1px;
+        border-color: #101216;
+
+        // gold position line
+        Rectangle {
+            x: (parent.width - 2px) / 2;
+            width: 2px;
+            y: 2px;
+            height: parent.height - 4px;
+            background: root.on-neutral ? Theme.text-2nd : Theme.accent;
+        }
+        // top light catch
+        Rectangle {
+            x: 2px; y: 1px;
+            width: parent.width - 4px;
+            height: 1px;
+            background: #FFFFFF55;
+        }
     }
 
     // ---- interaction ----------------------------------------------------

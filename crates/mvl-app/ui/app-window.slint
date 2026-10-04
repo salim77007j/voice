@@ -1,11 +1,20 @@
-// Micro-Vocal Lab — main window (plan §8.2).
+// Micro-Vocal Lab — main window, studio-rack redesign (Phase 7.2,
+// Audioprecise Pro reference).
 //
 // Layout (LTR default; mirrors under RTL except the transport cluster and
 // the timeline itself — universal media conventions):
-//   toolbar  ·  [ transport · waveform canvas ]  +  [ 3 precision modules ]  ·  status bar
 //
-// All strings go through @tr() — the English source strings are the
-// default, the Arabic catalog ships in translations/ar/LC_MESSAGES.
+//   ┌ nameplate ─ MICRO VOCAL LAB · PROJECT file · [Import][Export][Devices]
+//   ├ waveform rack ─ full-width overview strip (recessed well, blue trace)
+//   ├ main row ─ [ PITCH | AIR | FORMANT channel strips ] [ RTA + LEVELS ]
+//   ├ transport ─ ⏮ ▶ ⏹ ● + green timecode + zoom cluster
+//   └ status bar ─ state LED · message · latency · EN | عربي
+//
+// Design language: machined gunmetal panels with corner screws and bevel
+// edges, gold = vocal/brand/engaged, blue = audio data, recessed display
+// wells, mono data typography. All strings go through @tr() — the
+// English source strings are the default, the Arabic catalog ships in
+// translations/ar/LC_MESSAGES.
 
 import { Theme } from "theme.slint";
 import { Translations } from "translations.slint";
@@ -17,6 +26,9 @@ import { TextButton, IconButtonBase } from "widgets/buttons.slint";
 import { ComboBox } from "std-widgets.slint";
 import { WaveformView, RulerTick } from "widgets/waveform-view.slint";
 import { ModuleCard } from "widgets/module-card.slint";
+import { RackPanel, ScrewHead, LedDot, EngravedLabel } from "widgets/rack.slint";
+import { SpectrumView } from "widgets/spectrum-view.slint";
+import { LevelMeter } from "widgets/level-meter.slint";
 
 // Embedded fonts (OFL, docs §8.7) — registered on component creation.
 import "../assets/fonts/IBMPlexSans-Regular.ttf";
@@ -31,12 +43,12 @@ import "../assets/fonts/IBMPlexMono-Medium.ttf";
 export component AppWindow inherits Window {
     default-font-family: Translations.font-family;
     default-font-size: 13px;
-    title: @tr("Micro-Vocal Lab");
+    title: @tr("Micro Vocal Lab");
     background: Theme.bg-base;
     min-width: 1080px;
-    min-height: 660px;
-    preferred-width: 1280px;
-    preferred-height: 800px;
+    min-height: 680px;
+    preferred-width: 1440px;
+    preferred-height: 900px;
 
     // ================= state published by the Rust controller ============
 
@@ -98,6 +110,16 @@ export component AppWindow inherits Window {
     in-out property <string> tract-value-text: "170";
     in-out property <string> tract-detail-text: "";
 
+    // analysis panel (RTA + levels, published at the UI tick rate from
+    // mvl-core::spectrum over the preview mix at the playhead)
+    in-out property <[float]> spectrum-bands;
+    in-out property <[float]> spectrum-peaks;
+    in-out property <float> level-l: 0;
+    in-out property <float> level-r: 0;
+    in-out property <float> level-peak-l: 0;
+    in-out property <float> level-peak-r: 0;
+    in-out property <bool> clip-latch: false;
+
     // ================= actions back into the controller ==================
 
     callback new-recording-clicked();
@@ -129,74 +151,97 @@ export component AppWindow inherits Window {
     // ================= layout ============================================
 
     VerticalLayout {
-        spacing: 0;
+        spacing: 6px;
+        padding: 6px;
 
-        // ---- toolbar ----------------------------------------------------
+        // ---- nameplate: machined rack strip ------------------------------
         Rectangle {
-            height: Theme.toolbar-height;
-            background: Theme.panel;
+            height: Theme.nameplate-height;
+            background: @linear-gradient(180deg, #2B2F34 0%, #242729 50%, #202329 100%);
             border-width: 1px;
             border-color: Theme.border;
+            border-radius: Theme.radius-panel;
+
+            // bevel light
+            Rectangle {
+                x: 1px; y: 1px;
+                width: parent.width - 2px;
+                height: 1px;
+                background: #FFFFFF1E;
+            }
+
+            ScrewHead { x: 6px; y: (parent.height - self.height) / 2; }
+            ScrewHead { x: parent.width - self.width - 6px; y: (parent.height - self.height) / 2; }
 
             FlexboxLayout {
                 alignment: LayoutAlignment.stretch;
-                x: Theme.space-4; y: 0;
-                width: parent.width - 2 * Theme.space-4;
+                x: 24px; y: 0;
+                width: parent.width - 48px;
                 height: parent.height;
                 flex-direction: Translations.rtl ? row-reverse : row;
                 spacing: Theme.space-3;
                 cross-axis-alignment: CrossAxisAlignment.center;
 
-                // app identity
-                Rectangle {
-                    width: 10px; height: 10px; border-radius: 5px;
-                    background: @radial-gradient(circle, Theme.accent 30%, Theme.accent-dim 100%);
+                // brand: gold pilot LED + engraved wordmark
+                LedDot {
+                    lit: true;
+                    led-color: Theme.accent;
+                    width: 9px; height: 9px;
                     cross-axis-self-alignment: CrossAxisAlignment.center;
                 }
                 Text {
-                    text: "Micro-Vocal Lab";
+                    text: "MICRO VOCAL LAB";
                     color: Theme.text;
-                    font-family: Translations.font-family;
+                    font-family: Theme.font-mono;
                     font-size: 14px;
                     font-weight: 600;
+                    letter-spacing: 2.2px;
                     vertical-alignment: TextVerticalAlignment.center;
                     cross-axis-self-alignment: CrossAxisAlignment.center;
                 }
-                Rectangle { width: 12px; height: 1px; cross-axis-self-alignment: CrossAxisAlignment.center; }
 
-                // record
-                TextButton {
-                    text: root.recording ? @tr("Stop Recording") : @tr("New Recording");
-                    tooltip: root.recording ? @tr("Stop Recording") : @tr("New Recording");
-                    danger: root.recording;
-                    enabled: !root.busy;
-                    clicked => { root.new-recording-clicked(); }
+                // separator screw line
+                Rectangle { width: 1px; height: 22px; background: Theme.border; cross-axis-self-alignment: CrossAxisAlignment.center; }
+
+                // project readout
+                Text {
+                    text: @tr("PROJECT");
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 9px;
+                    font-weight: 600;
+                    letter-spacing: 1.2px;
+                    vertical-alignment: TextVerticalAlignment.center;
                     cross-axis-self-alignment: CrossAxisAlignment.center;
-
-                    IconRecordDot {
-                        width: 10px; height: 10px;
-                        live: root.recording;
-                        x: 8px;
-                        y: (parent.height - self.height) / 2;
-                    }
                 }
+                Text {
+                    text: root.has-audio ? root.file-name : @tr("no file");
+                    color: root.has-audio ? Theme.text-2nd : Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 12px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    overflow: elide;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                Rectangle { width: 12px; height: 1px; cross-axis-self-alignment: CrossAxisAlignment.center; }
 
                 // import
                 TextButton {
-                    text: @tr("Import File");
+                    text: @tr("Import");
                     tooltip: @tr("Import File");
                     enabled: !root.busy && !root.recording;
                     clicked => { root.import-clicked(); }
                     cross-axis-self-alignment: CrossAxisAlignment.center;
 
                     IconImport {
-                        width: 15px; height: 15px;
+                        width: 14px; height: 14px;
                         x: 9px;
                         y: (parent.height - self.height) / 2;
                     }
                 }
 
-                // export (primary teal)
+                // export (primary gold)
                 TextButton {
                     text: @tr("Export");
                     tooltip: @tr("Export the processed audio");
@@ -206,7 +251,7 @@ export component AppWindow inherits Window {
                     cross-axis-self-alignment: CrossAxisAlignment.center;
 
                     IconExport {
-                        width: 15px; height: 15px;
+                        width: 14px; height: 14px;
                         x: 9px;
                         y: (parent.height - self.height) / 2;
                     }
@@ -223,117 +268,36 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ---- main area ---------------------------------------------------
-        FlexboxLayout {
-            flex-direction: Translations.rtl ? row-reverse : row;
-            alignment: LayoutAlignment.stretch;
-            cross-axis-alignment: CrossAxisAlignment.stretch;
+        // ---- waveform rack: full-width overview strip ---------------------
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: Theme.radius-panel;
 
-            // center: transport + waveform
+            Rectangle {
+                x: 1px; y: 1px;
+                width: parent.width - 2px;
+                height: 1px;
+                background: #FFFFFF14;
+            }
+
+            ScrewHead { x: 7px; y: 5px; }
+            ScrewHead { x: parent.width - self.width - 7px; y: 5px; }
+
             VerticalLayout {
+                padding: 4px;
+                padding-top: 0px;
                 spacing: 0;
-                horizontal-stretch: 1;
 
-                // transport bar (intentionally LTR in RTL locales: media
-                // convention — transport glyphs keep their direction)
-                Rectangle {
-                    height: Theme.transport-height;
-                    background: Theme.bg-base;
-                    border-width: 1px;
-                    border-color: Theme.border;
-
-                    HorizontalLayout {
-                        x: Theme.space-3; y: 0;
-                        width: parent.width - 2 * Theme.space-3;
-                        height: parent.height;
-                        spacing: Theme.space-2;
-                        cross-axis-alignment: CrossAxisAlignment.center;
-
-                        IconButtonBase {
-                            tooltip: @tr("Rewind to start");
-                            enabled: root.has-audio;
-                            clicked => { root.rewind-clicked(); }
-                            IconRewind { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-                        IconButtonBase {
-                            tooltip: root.playing ? @tr("Pause") : @tr("Play");
-                            enabled: root.has-audio;
-                            accent: Theme.play;
-                            clicked => { root.play-pause-clicked(); }
-                            if root.playing: IconPause { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                            if !root.playing: IconPlay { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-                        IconButtonBase {
-                            tooltip: @tr("Stop");
-                            enabled: root.has-audio;
-                            clicked => { root.stop-clicked(); }
-                            IconStop { width: 16px; height: 16px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-
-                        Rectangle { width: 12px; height: 1px; cross-axis-self-alignment: CrossAxisAlignment.center; }
-
-                        IconButtonBase {
-                            size: 30px;
-                            tooltip: @tr("Zoom out");
-                            enabled: root.has-audio;
-                            clicked => { root.zoom-at(0.5, -1); }
-                            IconZoomOut { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-                        IconButtonBase {
-                            size: 30px;
-                            tooltip: @tr("Zoom in");
-                            enabled: root.has-audio;
-                            clicked => { root.zoom-at(0.5, 1); }
-                            IconZoomIn { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-                        IconButtonBase {
-                            size: 30px;
-                            tooltip: @tr("Fit whole file");
-                            enabled: root.has-audio;
-                            clicked => { root.zoom-fit-clicked(); }
-                            IconFit { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                        }
-
-                        Rectangle { height: 1px; horizontal-stretch: 1; }
-
-                        // timecode (mono, tabular)
-                        Text {
-                            text: root.position-text;
-                            color: Theme.text;
-                            font-family: Theme.font-mono;
-                            font-size: 15px;
-                            font-weight: 500;
-                            vertical-alignment: TextVerticalAlignment.center;
-                            cross-axis-self-alignment: CrossAxisAlignment.center;
-                        }
-                        Text {
-                            text: "──";
-                            color: Theme.text-muted;
-                            font-family: Theme.font-mono;
-                            font-size: 13px;
-                            vertical-alignment: TextVerticalAlignment.center;
-                            cross-axis-self-alignment: CrossAxisAlignment.center;
-                        }
-                        Text {
-                            text: root.duration-text;
-                            color: Theme.text-2nd;
-                            font-family: Theme.font-mono;
-                            font-size: 15px;
-                            vertical-alignment: TextVerticalAlignment.center;
-                            cross-axis-self-alignment: CrossAxisAlignment.center;
-                        }
-                        Text {
-                            text: root.rate-text;
-                            color: Theme.text-muted;
-                            font-family: Theme.font-mono;
-                            font-size: 12px;
-                            vertical-alignment: TextVerticalAlignment.center;
-                            cross-axis-self-alignment: CrossAxisAlignment.center;
-                        }
-                    }
+                EngravedLabel {
+                    text: @tr("WAVEFORM") + " · " + @tr("OVERVIEW");
+                    height: 16px;
+                    x: Theme.space-3;
+                    vertical-alignment: TextVerticalAlignment.center;
                 }
 
-                // waveform canvas (fills the rest)
                 wf := WaveformView {
                     wave: root.wave;
                     has-audio: root.has-audio;
@@ -353,17 +317,28 @@ export component AppWindow inherits Window {
                     canvas-resized() => { root.canvas-resized(); }
                 }
             }
+        }
 
-            // side panel: the three precision modules
-            Rectangle {
-                width: Theme.side-panel-width;
-                background: Theme.bg-base;
-                border-width: 1px;
-                border-color: Theme.border;
+        // ---- main row: channel strips + analysis rack ----------------------
+        FlexboxLayout {
+            flex-direction: Translations.rtl ? row-reverse : row;
+            alignment: LayoutAlignment.stretch;
+            cross-axis-alignment: CrossAxisAlignment.stretch;
+            height: 292px;
 
-                VerticalLayout {
-                    padding: Theme.space-3;
-                    spacing: Theme.space-3;
+            // channel strips in a rack panel
+            RackPanel {
+                screws: true;
+                horizontal-stretch: 1;
+
+                FlexboxLayout {
+                    x: Theme.space-2; y: 2px;
+                    width: parent.width - 2 * Theme.space-2;
+                    height: parent.height - 4px;
+                    flex-direction: Translations.rtl ? row-reverse : row;
+                    alignment: LayoutAlignment.stretch;
+                    cross-axis-alignment: CrossAxisAlignment.stretch;
+                    spacing: Theme.space-2;
 
                     pitch-card := ModuleCard {
                         icon-kind: 0;
@@ -410,31 +385,275 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            // analysis rack: RTA spectrum + master levels + session info
+            RackPanel {
+                screws: true;
+                width: Theme.analysis-width;
+
+                VerticalLayout {
+                    y: 2px;
+                    padding: Theme.space-2;
+                    spacing: 6px;
+
+                    EngravedLabel {
+                        text: @tr("RTA ANALYZER");
+                        height: 14px;
+                    }
+
+                    SpectrumView {
+                        vertical-stretch: 1;
+                        bands: root.spectrum-bands;
+                        peaks: root.spectrum-peaks;
+                        active: root.has-audio;
+                        corner-label: @tr("PEAK HOLD");
+                    }
+
+                    // ---- master level section --------------------------------
+                    EngravedLabel {
+                        text: @tr("MASTER LEVEL");
+                        height: 14px;
+                    }
+
+                    FlexboxLayout {
+                        flex-direction: Translations.rtl ? row-reverse : row;
+                        alignment: LayoutAlignment.stretch;
+                        spacing: Theme.space-2;
+                        height: 108px;
+
+                        LevelMeter {
+                            level: root.level-l;
+                            peak: root.level-peak-l;
+                            clip: root.clip-latch;
+                            label: "L";
+                            cross-axis-self-alignment: CrossAxisAlignment.stretch;
+                        }
+                        LevelMeter {
+                            level: root.level-r;
+                            peak: root.level-peak-r;
+                            clip: root.clip-latch;
+                            label: "R";
+                            cross-axis-self-alignment: CrossAxisAlignment.stretch;
+                        }
+
+                        // session info block
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+
+                            Text {
+                                text: @tr("Depth") + ": " + (root.has-audio ? root.depth-text : "—");
+                                color: Theme.text-2nd;
+                                font-family: Theme.font-mono;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.has-audio && root.preview-latency-text != ""
+                                    ? @tr("Latency") + ": " + root.preview-latency-text
+                                    : @tr("Latency") + ": —";
+                                color: Theme.text-2nd;
+                                font-family: Theme.font-mono;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "40 · 20 Hz – 20 kHz";
+                                color: Theme.text-muted;
+                                font-family: Theme.font-mono;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // ---- status bar ---------------------------------------------------
+        // ---- transport bar: iconic controls + green timecode --------------
         Rectangle {
-            height: Theme.statusbar-height;
-            background: Theme.panel;
+            height: Theme.transport-height;
+            background: @linear-gradient(180deg, #2B2F34 0%, #242729 55%, #1F2226 100%);
             border-width: 1px;
             border-color: Theme.border;
+            border-radius: Theme.radius-panel;
+
+            Rectangle {
+                x: 1px; y: 1px;
+                width: parent.width - 2px;
+                height: 1px;
+                background: #FFFFFF1E;
+            }
+
+            ScrewHead { x: 6px; y: parent.height - self.height - 6px; }
+            ScrewHead { x: parent.width - self.width - 6px; y: parent.height - self.height - 6px; }
 
             FlexboxLayout {
                 alignment: LayoutAlignment.stretch;
-                x: Theme.space-3; y: 0;
-                width: parent.width - 2 * Theme.space-3;
+                x: 24px; y: 0;
+                width: parent.width - 48px;
+                height: parent.height;
+                flex-direction: row;   // transport cluster stays LTR (media convention)
+                spacing: Theme.space-2;
+                cross-axis-alignment: CrossAxisAlignment.center;
+
+                IconButtonBase {
+                    tooltip: @tr("Rewind to start");
+                    enabled: root.has-audio;
+                    clicked => { root.rewind-clicked(); }
+                    IconRewind { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                }
+
+                // big play / pause
+                Rectangle {
+                    width: 44px; height: 44px;
+                    border-radius: 22px;
+                    background: !root.has-audio ? #26292E
+                        : (ta-play.has-hover || ta-play.pressed ? #4AE89E : Theme.play);
+                    border-width: 2px;
+                    border-color: !root.has-audio ? Theme.border : #1E7A4C;
+
+                    ta-play := TouchArea {
+                        enabled: root.has-audio;
+                        clicked => { root.play-pause-clicked(); }
+                        accessible-role: AccessibleRole.button;
+                        accessible-label: root.playing ? @tr("Pause") : @tr("Play");
+                    }
+                    if root.playing: IconPause { icon-color: #10241A; width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                    if !root.playing: IconPlay { icon-color: #10241A; width: 20px; height: 20px; x: (parent.width - self.width)/2 + 1px; y: (parent.height - self.height)/2; }
+                }
+
+                IconButtonBase {
+                    tooltip: @tr("Stop");
+                    enabled: root.has-audio;
+                    clicked => { root.stop-clicked(); }
+                    IconStop { width: 16px; height: 16px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                }
+
+                Rectangle { width: 10px; height: 1px; }
+
+                // big record button (red when armed/live)
+                Rectangle {
+                    width: 44px; height: 44px;
+                    border-radius: 22px;
+                    background: root.recording
+                        ? (ta-rec.has-hover ? #FF6666 : Theme.record)
+                        : (ta-rec.has-hover || ta-rec.pressed ? #4A2A2A : #2E3238);
+                    border-width: 2px;
+                    border-color: root.recording ? #8A1414 : #5A3A3A;
+
+                    ta-rec := TouchArea {
+                        clicked => { root.new-recording-clicked(); }
+                        accessible-role: AccessibleRole.button;
+                        accessible-label: root.recording ? @tr("Stop Recording") : @tr("New Recording");
+                    }
+                    IconRecordDot {
+                        width: 16px; height: 16px;
+                        live: root.recording;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // recording elapsed (mono, red-tinted while live)
+                if root.recording: Text {
+                    text: root.recording-elapsed;
+                    color: Theme.record;
+                    font-family: Theme.font-mono;
+                    font-size: 15px;
+                    font-weight: 500;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                Rectangle { width: 16px; height: 1px; }
+
+                // timecode: position (green, 18pt bold mono) / duration
+                Text {
+                    text: root.position-text;
+                    color: Theme.timecode;
+                    font-family: Theme.font-mono;
+                    font-size: 19px;
+                    font-weight: 600;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Text {
+                    text: "/";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 13px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Text {
+                    text: root.duration-text;
+                    color: Theme.text-2nd;
+                    font-family: Theme.font-mono;
+                    font-size: 14px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Text {
+                    text: root.rate-text;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 11px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                Rectangle { height: 1px; horizontal-stretch: 1; }
+
+                // zoom cluster
+                IconButtonBase {
+                    size: 34px;
+                    tooltip: @tr("Zoom out");
+                    enabled: root.has-audio;
+                    clicked => { root.zoom-at(0.5, -1); }
+                    IconZoomOut { width: 14px; height: 14px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                }
+                IconButtonBase {
+                    size: 34px;
+                    tooltip: @tr("Zoom in");
+                    enabled: root.has-audio;
+                    clicked => { root.zoom-at(0.5, 1); }
+                    IconZoomIn { width: 14px; height: 14px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                }
+                IconButtonBase {
+                    size: 34px;
+                    tooltip: @tr("Fit whole file");
+                    enabled: root.has-audio;
+                    clicked => { root.zoom-fit-clicked(); }
+                    IconFit { width: 14px; height: 14px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                }
+            }
+        }
+
+        // ---- status bar -----------------------------------------------------
+        Rectangle {
+            height: Theme.statusbar-height;
+            background: #1E2126;
+            border-width: 1px;
+            border-color: #14161A;
+            border-radius: 3px;
+
+            FlexboxLayout {
+                alignment: LayoutAlignment.stretch;
+                x: Theme.space-2; y: 0;
+                width: parent.width - 2 * Theme.space-2;
                 height: parent.height;
                 flex-direction: Translations.rtl ? row-reverse : row;
                 spacing: Theme.space-3;
                 cross-axis-alignment: CrossAxisAlignment.center;
 
-                // state dot: red = recording, green = playing, amber = paused
-                Rectangle {
-                    width: 8px; height: 8px; border-radius: 4px;
-                    background: root.recording ? Theme.record
+                // state LED: red = recording, green = playing, amber = paused
+                LedDot {
+                    width: 8px; height: 8px;
+                    led-color: root.recording ? Theme.record
                         : root.playing ? Theme.play
-                        : root.paused ? Theme.warn
-                        : Theme.text-muted;
+                        : Theme.warn;
+                    lit: root.recording || root.playing || root.paused;
                     cross-axis-self-alignment: CrossAxisAlignment.center;
                 }
 
@@ -444,6 +663,7 @@ export component AppWindow inherits Window {
                     font-family: Translations.font-family;
                     font-size: 12px;
                     vertical-alignment: TextVerticalAlignment.center;
+                    overflow: elide;
                     cross-axis-self-alignment: CrossAxisAlignment.center;
                 }
 
@@ -496,15 +716,12 @@ export component AppWindow inherits Window {
             clicked => { root.close-devices-clicked(); }
         }
 
-        Rectangle {
-            width: 460px;
-            height: 320px;
+        RackPanel {
+            screws: true;
+            width: 480px;
+            height: 340px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            background: Theme.panel;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 6px;
 
             TouchArea {
                 // swallow clicks inside the dialog so the scrim does not
@@ -513,7 +730,8 @@ export component AppWindow inherits Window {
 
             VerticalLayout {
                 padding: Theme.space-4;
-                spacing: Theme.space-3;
+                padding-top: 28px;
+                spacing: Theme.space-2;
 
                 Text {
                     text: @tr("Audio Devices");
@@ -523,11 +741,9 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                 }
 
-                Text {
-                    text: @tr("Input device (recording)");
-                    color: Theme.text-2nd;
-                    font-family: Translations.font-family;
-                    font-size: 12px;
+                EngravedLabel {
+                    text: @tr("INPUT");
+                    height: 12px;
                 }
                 ComboBox {
                     model: root.input-device-names;
@@ -536,11 +752,9 @@ export component AppWindow inherits Window {
                     enabled: !root.recording;
                 }
 
-                Text {
-                    text: @tr("Output device (playback)");
-                    color: Theme.text-2nd;
-                    font-family: Translations.font-family;
-                    font-size: 12px;
+                EngravedLabel {
+                    text: @tr("OUTPUT");
+                    height: 12px;
                 }
                 ComboBox {
                     model: root.output-device-names;

@@ -1,0 +1,200 @@
+// Rotary knob (Phase 7.2, Audioprecise Pro reference): skeuomorphic
+// machined control — beveled rim, brushed body, bright indicator line,
+// tick marks around the sweep.
+//
+// Interaction (channel-strip conventions):
+//   · drag vertically over the knob to change the value (~150 px for the
+//     full range; Shift = fine, 1/8 of the rate)
+//   · mouse wheel steps by `step`
+//   · arrow keys step by `step`, Shift+arrows by `coarse-step`
+//   · Home jumps to neutral, End to maximum, double-click resets
+//
+// The knob never emits unclamped values and never mutates on its own:
+// like PrecisionSlider it proposes candidates through `changed(float)`
+// and the Rust controller remains the single source of truth.
+
+import { Theme } from "../theme.slint";
+
+export component Knob inherits Rectangle {
+    // ---- contract -------------------------------------------------------
+    in property <float> value;
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> neutral;
+    in property <float> step;
+    in property <float> coarse-step;
+    in property <length> size: 54px;
+    in property <color> accent: Theme.accent;
+    callback changed(float);
+    callback reset-pressed();
+
+    // ---- derived --------------------------------------------------------
+    out property <float> fraction: (root.value - root.minimum) / (root.maximum - root.minimum);
+    property <bool> on-neutral: Math.abs(root.value - root.neutral) < 0.000001;
+    property <angle> ang: -135deg + 270deg * root.fraction;
+    // pixels of vertical drag for the full range
+    property <float> drag-range: 150;
+    property <length> drag-last-y: 0px;
+    property <bool> fine-drag: false;   // Shift held when the drag started
+
+    width: root.size;
+    height: root.size;
+
+    // ---- tick ring (behind the body) ------------------------------------
+    // seven ticks over the 270° sweep, rotated the same way as the
+    // indicator: full-size transparent carrier, child at the top.
+    for tick[i] in 7: Rectangle {
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        x: -3px;
+        y: -3px;
+        transform-rotation: -135deg + 45deg * i;
+
+        Rectangle {
+            width: 2px;
+            height: 3px;
+            border-radius: 1px;
+            y: 1px;
+            x: (parent.width - self.width) / 2;
+            background: i == 3 ? Theme.edge : Theme.border;
+        }
+    }
+
+    // ---- bevel rim --------------------------------------------------------
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: self.width / 2;
+        background: @radial-gradient(circle at self.width * 0.38 self.height * 0.32, #5A6169 0%, #343940 45%, #16181C 100%);
+        border-width: 1px;
+        border-color: #0E1013;
+
+        // bottom rim shadow (the seated-in-panel depth cue)
+        Rectangle {
+            x: 2px;
+            y: parent.height * 0.62;
+            width: parent.width - 4px;
+            height: parent.height * 0.36;
+            border-radius: self.width / 2;
+            background: #00000055;
+        }
+    }
+
+    // ---- knob body --------------------------------------------------------
+    Rectangle {
+        x: 5px; y: 5px;
+        width: parent.width - 10px;
+        height: parent.height - 10px;
+        border-radius: self.width / 2;
+        background: ta.has-hover
+            ? @radial-gradient(circle at self.width * 0.36 self.height * 0.28, #565D66 0%, #2E3238 50%, #14161A 100%)
+            : @radial-gradient(circle at self.width * 0.36 self.height * 0.28, #4E545C 0%, #26292E 50%, #121418 100%);
+        border-width: 1px;
+        border-color: #0C0E10;
+
+        // brushed-metal sheen (top-left crescent)
+        Rectangle {
+            width: 52%; height: 28%;
+            border-radius: self.width / 2;
+            x: parent.width * 0.12;
+            y: parent.height * 0.08;
+            background: #FFFFFF1E;
+        }
+    }
+
+    // ---- indicator (rotates around the knob center) -----------------------
+    Rectangle {
+        width: 100%; height: 100%;
+        transform-rotation: root.ang;
+
+        Rectangle {
+            x: (parent.width - 3px) / 2;
+            y: 8px;
+            width: 3px;
+            height: parent.height * 0.34;
+            border-radius: 1.5px;
+            background: root.on-neutral ? Theme.text-2nd : root.accent;
+            // glowing tip: bright core over the gold body
+            Rectangle {
+                width: 100%;
+                height: 30%;
+                background: #FFFFFFB0;
+            }
+        }
+    }
+
+    // ---- center cap ---------------------------------------------------------
+    Rectangle {
+        width: 26%; height: 26%;
+        border-radius: self.width / 2;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: @radial-gradient(circle at self.width * 0.40 self.height * 0.34, #565C64 0%, #23262B 70%, #15171B 100%);
+        border-width: 1px;
+        border-color: #0E1013;
+    }
+
+    // ---- interaction ----------------------------------------------------------
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(ev) => {
+            if (ev.text == Key.LeftArrow || ev.text == Key.DownArrow) {
+                root.changed(clamp-value(root.value - (ev.modifiers.shift ? root.coarse-step : root.step)));
+                return accept;
+            } else if (ev.text == Key.RightArrow || ev.text == Key.UpArrow) {
+                root.changed(clamp-value(root.value + (ev.modifiers.shift ? root.coarse-step : root.step)));
+                return accept;
+            } else if (ev.text == Key.Home) {
+                root.changed(root.neutral);
+                return accept;
+            } else if (ev.text == Key.End) {
+                root.changed(root.maximum);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    ta := TouchArea {
+        width: 100%; height: 100%;
+        clicked => { fs.focus(); }
+        double-clicked => { root.reset-pressed(); }
+        pointer-event(ev) => {
+            if (ev.button == PointerEventButton.left
+                && ev.kind == PointerEventKind.down) {
+                fs.focus();
+                root.drag-last-y = self.mouse-y;
+                root.fine-drag = ev.modifiers.shift;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                // pixels moved upward since the previous event (length → float)
+                let dy = (root.drag-last-y - self.mouse-y) / 1px;
+                root.drag-last-y = self.mouse-y;
+                let scale = (root.maximum - root.minimum) / root.drag-range
+                    * (root.fine-drag ? 0.125 : 1.0);
+                root.changed(clamp-value(root.value + dy * scale));
+            }
+        }
+        scroll-event(ev) => {
+            root.changed(clamp-value(root.value + (ev.delta-y > 0 ? 1 : -1) * root.step));
+            return accept;
+        }
+        accessible-role: AccessibleRole.slider;
+        accessible-label: "knob";
+        accessible-value: round(root.value * 100) / 100;
+    }
+
+    // focus ring
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: fs.has-focus ? root.accent : transparent;
+        opacity: fs.has-focus ? 0.9 : 0.0;
+    }
+
+    function clamp-value(v: float) -> float {
+        return Math.min(root.maximum, Math.max(root.minimum, v));
+    }
+}

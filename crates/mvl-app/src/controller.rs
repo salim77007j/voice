@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use mvl_core::params::{MAX_PITCH_SEMITONES, NEUTRAL_TRACT_MM};
+use mvl_core::spectrum::{RtaAnalyzer, RtaSnapshot, CLIP_DBFS, RTA_BANDS};
 use mvl_core::VocalParams;
 use mvl_io::recorder::{RecordRequest, Recorder};
 use mvl_io::InterleavedAudio;
@@ -29,6 +30,13 @@ use crate::waveform::{render_waveform, ruler_ticks, ViewSpan};
 
 /// How often the UI timer ticks (30 fps refresh + inbox drain).
 const UI_TICK_MS: u64 = 33;
+/// RTA analysis window (points): 2048 @ 48 kHz ≈ 43 ms.
+const RTA_FFT_SIZE: usize = 2048;
+/// Per-tick decay of the RTA peak-hold caps (0..1 units): a full-scale
+/// cap falls to zero in ~1.6 s at 30 fps.
+const RTA_PEAK_DECAY: f32 = 0.02;
+/// How long the clip LED stays latched after a clip event.
+const CLIP_HOLD_MS: u64 = 1000;
 /// Recording target (plan §9.2: 192 kHz / mono vocal capture).
 const RECORD_REQUEST: RecordRequest = RecordRequest {
     target_rate: 192_000,
@@ -69,6 +77,17 @@ struct Inner {
     /// Cached inventory behind the picker (index → device mapping).
     input_devices: Vec<mvl_io::DeviceInfo>,
     output_devices: Vec<mvl_io::DeviceInfo>,
+    /// RTA analyzer + display state (Phase 7.2 analysis rack).
+    rta: RtaAnalyzer,
+    rta_out: RtaSnapshot,
+    /// Peak-hold caps for the RTA bars (decayed every tick).
+    rta_peaks: [f32; RTA_BANDS],
+    /// Downmix scratch for the analysis window (reused, no per-tick alloc).
+    rta_mono: Vec<f32>,
+    /// Meter peak-hold values (L/R, 0..1 meter scale).
+    meter_peaks: [f32; 2],
+    /// When the clip LED may unlatch (None = not lit).
+    clip_until: Option<std::time::Instant>,
 }
 
 impl Inner {
@@ -111,6 +130,12 @@ impl Controller {
             selected_output: None,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
+            rta: RtaAnalyzer::new(RTA_FFT_SIZE),
+            rta_out: RtaSnapshot::default(),
+            rta_peaks: [0.0; RTA_BANDS],
+            rta_mono: vec![0.0; RTA_FFT_SIZE],
+            meter_peaks: [0.0; 2],
+            clip_until: None,
         }));
 
         macro_rules! wire {
@@ -277,6 +302,13 @@ impl Controller {
     /// Slint platform errors (no display, renderer failure).
     pub fn run(&self) -> Result<(), slint::PlatformError> {
         self.app.run()
+    }
+
+    /// Run one UI tick synchronously (headless screenshot path): the
+    /// analysis rack, transport state and telemetry update exactly as the
+    /// 30 fps timer would have done, so static renders are honest.
+    pub fn refresh(&self) {
+        ui_tick(&self.app, &self.state);
     }
 
     /// Load an audio file path (CLI path; decode runs on a worker thread
@@ -1008,7 +1040,7 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
     }
 
     // 2) live transport + telemetry
-    let inner = state.borrow();
+    let mut inner = state.borrow_mut();
     let playing = inner
         .player
         .as_ref()
@@ -1022,8 +1054,12 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
     app.set_playing(playing);
     app.set_paused(paused);
 
-    if let Some(player) = &inner.player {
-        let pos = player.position_seconds().min(inner.duration());
+    let playhead = inner
+        .player
+        .as_ref()
+        .map(|p| p.position_seconds().min(inner.duration()));
+
+    if let (Some(player), Some(pos)) = (&inner.player, playhead) {
         app.set_playhead(pos as f32);
         app.set_position_text(format::timecode(pos).into());
         app.set_show_playhead(true);
@@ -1043,6 +1079,114 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
             "bypass (neutral)".to_string()
         };
         app.set_air_detail_text(air_detail.into());
+    }
+
+    // 2.5) RTA spectrum + master levels (Phase 7.2 analysis rack).
+    //
+    // The analysis window is the RTA_FFT_SIZE span of the *preview mix*
+    // centered on the playhead: during playback it dances with the
+    // music; paused/stopped it freezes at the playhead like a paused
+    // tape machine; with no session the rack decays to dark.
+    let pos = playhead.unwrap_or_else(|| f64::from(app.get_playhead()));
+    if let Some(session) = inner.session.clone() {
+        let preview = session.preview.clone();
+        let ch = preview.channels as usize;
+        let rate = preview.sample_rate;
+        let frames = preview.frames();
+        let center = (pos * f64::from(rate)).round() as usize;
+        let start = center.saturating_sub(RTA_FFT_SIZE / 2);
+
+        // Split the RefMut into disjoint field borrows so the analyzer
+        // can take the mono scratch and the output snapshot at once.
+        let Inner {
+            rta,
+            rta_mono,
+            rta_out,
+            rta_peaks,
+            meter_peaks,
+            clip_until,
+            ..
+        } = &mut *inner;
+
+        // downmix + per-channel peaks in one pass
+        let mut ch_peak = [0.0f32; 2];
+        for (k, slot) in rta_mono.iter_mut().enumerate() {
+            let frame = start + k;
+            if frame < frames {
+                let base = frame * ch;
+                let mut acc = 0.0f32;
+                for (c, &s) in preview.data[base..base + ch].iter().enumerate() {
+                    acc += s;
+                    if c < 2 {
+                        ch_peak[c] = ch_peak[c].max(s.abs());
+                    }
+                }
+                *slot = acc / ch as f32;
+            } else {
+                *slot = 0.0;
+            }
+        }
+
+        rta.analyze(rta_mono, rate, rta_out);
+
+        // RTA peak-hold caps: hold at the max, then decay linearly.
+        for (peak, &b) in rta_peaks.iter_mut().zip(rta_out.bands.iter()) {
+            *peak = if b >= *peak {
+                b
+            } else {
+                (*peak - RTA_PEAK_DECAY).max(b).max(0.0)
+            };
+        }
+        // Meter values: per-channel peak on the dB-linear meter scale.
+        let l_db = 20.0 * ch_peak[0].max(1e-9).log10();
+        let r_db = if ch > 1 {
+            20.0 * ch_peak[1].max(1e-9).log10()
+        } else {
+            l_db
+        };
+        let l = mvl_core::spectrum::db_to_meter(l_db);
+        let r = mvl_core::spectrum::db_to_meter(r_db);
+        meter_peaks[0] = if l >= meter_peaks[0] {
+            l
+        } else {
+            (meter_peaks[0] - RTA_PEAK_DECAY).max(l).max(0.0)
+        };
+        meter_peaks[1] = if r >= meter_peaks[1] {
+            r
+        } else {
+            (meter_peaks[1] - RTA_PEAK_DECAY).max(r).max(0.0)
+        };
+        // Clip latch: any channel over CLIP_DBFS lights the LED for 1 s.
+        if l_db > CLIP_DBFS || r_db > CLIP_DBFS {
+            *clip_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(CLIP_HOLD_MS));
+        }
+        let clip = clip_until
+            .map(|t| std::time::Instant::now() < t)
+            .unwrap_or(false);
+
+        app.set_spectrum_bands(Rc::new(slint::VecModel::from(rta_out.bands.to_vec())).into());
+        app.set_spectrum_peaks(Rc::new(slint::VecModel::from(rta_peaks.to_vec())).into());
+        app.set_level_l(l);
+        app.set_level_r(r);
+        app.set_level_peak_l(meter_peaks[0]);
+        app.set_level_peak_r(meter_peaks[1]);
+        app.set_clip_latch(clip);
+    } else {
+        // No session: decay the rack to dark (no sudden blanks).
+        for p in &mut inner.rta_peaks {
+            *p = (*p - RTA_PEAK_DECAY).max(0.0);
+        }
+        for p in &mut inner.meter_peaks {
+            *p = (*p - RTA_PEAK_DECAY).max(0.0);
+        }
+        app.set_spectrum_bands(Rc::new(slint::VecModel::from(vec![0.0; RTA_BANDS])).into());
+        app.set_spectrum_peaks(Rc::new(slint::VecModel::from(inner.rta_peaks.to_vec())).into());
+        app.set_level_l(0.0);
+        app.set_level_r(0.0);
+        app.set_level_peak_l(inner.meter_peaks[0]);
+        app.set_level_peak_r(inner.meter_peaks[1]);
+        app.set_clip_latch(false);
     }
 
     // 3) recording elapsed

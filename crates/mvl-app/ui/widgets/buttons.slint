@@ -1,5 +1,6 @@
-// Shared button chrome: focusable, keyboard-operable, tooltip-ready,
-// 120 ms hover transitions. Variants: default / primary (teal) / danger (red).
+// Shared button chrome (rack restyle): focusable, keyboard-operable,
+// tooltip-ready, 120 ms hover transitions. Variants: default (gunmetal) /
+// primary (gold, engraved-dark text) / danger (red).
 
 import { Theme } from "../theme.slint";
 import { Translations } from "../translations.slint";
@@ -13,8 +14,8 @@ export component IconButtonBase {
     in property <color> accent: Theme.accent;
 
     // -- chrome --
-    property <color> idle-bg: Theme.raised;
-    property <color> hover-bg: #2E323C;
+    property <color> idle-bg: #343940;
+    property <color> hover-bg: #3E444C;
     property <color> idle-border: Theme.border;
 
     width: root.size;
@@ -23,10 +24,19 @@ export component IconButtonBase {
     Rectangle {
         width: 100%; height: 100%;
         border-radius: Theme.radius-control;
-        background: !root.enabled ? Theme.panel : (ta.has-hover || ta.pressed ? root.hover-bg : root.idle-bg);
+        background: !root.enabled ? #26292E
+            : (ta.has-hover || ta.pressed ? root.hover-bg : root.idle-bg);
         border-width: 1px;
-        border-color: root.idle-border;
+        border-color: !root.enabled ? Theme.panel : root.idle-border;
         opacity: root.enabled ? 1.0 : 0.45;
+
+        // machined top light
+        Rectangle {
+            x: 1px; y: 1px;
+            width: parent.width - 2px;
+            height: 1px;
+            background: #FFFFFF1C;
+        }
     }
 
     // icon content (children of the IconButtonBase land here)
@@ -65,12 +75,12 @@ export component IconButtonBase {
     }
 }
 
-// Text button used in the toolbar and status bar.
+// Text button used in the nameplate and status bar.
 export component TextButton inherits Rectangle {
     callback clicked();
     in property <string> text;
     in property <bool> enabled: true;
-    in property <bool> primary: false;    // teal filled (Export)
+    in property <bool> primary: false;    // gold filled (Export)
     in property <bool> danger: false;     // red (recording)
     in property <bool> active: false;     // pressed/engaged look
     in property <string> tooltip: "";
@@ -85,28 +95,37 @@ export component TextButton inherits Rectangle {
     Rectangle {
         width: 100%; height: 100%;
         border-radius: Theme.radius-control;
-        background: !root.enabled ? Theme.panel
-            : root.primary ? (ta.has-hover || ta.pressed ? Theme.accent : #26A69A)
+        background: !root.enabled ? #26292E
+            : root.primary ? (ta.has-hover || ta.pressed ? #F5CC00 : Theme.accent)
             : root.danger ? (ta.has-hover || ta.pressed ? #E56663 : Theme.record)
-            : root.active ? #2E323C
-            : (ta.has-hover || ta.pressed ? #2E323C : Theme.raised);
+            : root.active ? #3E444C
+            : (ta.has-hover || ta.pressed ? #3E444C : #343940);
         border-width: 1px;
         border-color: !root.enabled ? Theme.panel
-            : root.primary ? transparent
+            : root.primary ? #8A7000
             : root.danger ? transparent
             : Theme.border;
         opacity: root.enabled ? 1.0 : 0.45;
+
+        // machined top light
+        Rectangle {
+            x: 1px; y: 1px;
+            width: parent.width - 2px;
+            height: 1px;
+            background: #FFFFFF1C;
+        }
     }
 
     txt := Text {
         text: root.text;
         color: !root.enabled ? Theme.text-muted
-            : root.primary || root.danger ? #FFFFFF
+            : root.primary ? #14161A          // dark engraved text on gold
+            : root.danger ? #FFFFFF
             : root.active ? Theme.accent
             : Theme.text;
         font-family: root.mono ? Theme.font-mono : (Translations.font-family);
         font-size: 13px;
-        font-weight: 500;
+        font-weight: root.primary ? 600 : 500;
         vertical-alignment: TextVerticalAlignment.center;
         horizontal-alignment: root.text-align;
         width: 100%; height: 100%;

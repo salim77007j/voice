@@ -181,6 +181,9 @@ fn screenshot_command(args: &[String]) {
         app.set_playhead(ph as f32);
         app.set_show_playhead(true);
     }
+    // One honest UI tick: the analysis rack, meters and telemetry show
+    // the same data the 30 fps timer would have published.
+    controller.refresh();
 
     let size = slint::PhysicalSize::new(width, height);
     match headless::render_to_png(controller.window(), size, std::path::Path::new(&output)) {

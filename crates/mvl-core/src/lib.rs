@@ -18,6 +18,7 @@ pub mod formant;
 pub mod limiter;
 pub mod params;
 pub mod pitch;
+pub mod spectrum;
 pub mod stft;
 pub mod testsupport;
 
@@ -29,4 +30,7 @@ pub use formant::FormantProcessor;
 pub use limiter::{guard_offline, sample_peak, true_peak};
 pub use params::{QualityProfile, VocalParams};
 pub use pitch::{PhaseVocoder, PitchPath, RatioConverter};
+pub use spectrum::{
+    db_to_meter, RtaAnalyzer, RtaSnapshot, CLIP_DBFS, METER_FLOOR_DB, RTA_BANDS, RTA_FLOOR_DB,
+};
 pub use stft::{AnalysisFrame, OverlapAdder, StftAnalyzer};

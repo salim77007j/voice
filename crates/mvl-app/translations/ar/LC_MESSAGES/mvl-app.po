@@ -134,3 +134,49 @@ msgstr "إغلاق"
 
 msgid "Automatic (all devices)"
 msgstr "تلقائي (كل الأجهزة)"
+
+# --- studio rack redesign (Phase 7.2) ---
+msgid "Import"
+msgstr "استيراد"
+
+msgid "no file"
+msgstr "لا يوجد ملف"
+
+msgid "PROJECT"
+msgstr "المشروع"
+
+msgid "WAVEFORM"
+msgstr "الموجة"
+
+msgid "OVERVIEW"
+msgstr "نظرة عامة"
+
+msgid "RTA ANALYZER"
+msgstr "محلّل الطيف"
+
+msgid "PEAK HOLD"
+msgstr "تثبيت القمم"
+
+msgid "MASTER LEVEL"
+msgstr "المستوى الرئيسي"
+
+msgid "Depth"
+msgstr "العمق"
+
+msgid "Latency"
+msgstr "زمن الاستجابة"
+
+msgid "RTA bands"
+msgstr "أشرطة الطيف"
+
+msgid "Peak hold"
+msgstr "تثبيت القمم"
+
+msgid "decay"
+msgstr "تلاشٍ"
+
+msgid "INPUT"
+msgstr "الإدخال"
+
+msgid "OUTPUT"
+msgstr "الإخراج"

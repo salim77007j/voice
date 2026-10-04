@@ -1,12 +1,24 @@
-// One precision-module card (plan §8.3), parameterized three times:
-// PITCH / AIR & BREATH / FORMANT. Each card shows the live value in
-// IBM Plex Mono, a detail readout, the custom precision slider and an
-// editable numeric field. The AIR card carries a live meter; the FORMANT
-// card carries the vocal-tract glyph whose tube length tracks the value.
+// One precision channel strip (Phase 7.2 rack redesign), parameterized
+// three times: PITCH / AIR & BREATH / FORMANT.
+//
+// Strip anatomy, top to bottom (Audioprecise channel-strip conventions):
+//   header    — status LED (lit when off-neutral) + engraved title + reset
+//   readout   — recessed well with the live value in IBM Plex Mono
+//   field     — compact editable numeric field (typed precision)
+//   knob      — skeuomorphic rotary control (drag / wheel / keys)
+//   fader     — the battle-tested PrecisionSlider, restyled as a recessed
+//               track with a metallic cap
+//   telemetry — module detail line + the air meter / vocal-tract glyph
+//
+// The interaction contract is identical to the v1.0 module card: every
+// change is *proposed* through callbacks, the Rust controller remains
+// the single source of truth and pushes canonical text back.
 
 import { Theme } from "../theme.slint";
 import { Translations } from "../translations.slint";
 import { PrecisionSlider, ResetButton } from "precision-slider.slint";
+import { Knob } from "knob.slint";
+import { LedDot } from "rack.slint";
 import { IconPitch, IconAir, IconFormant } from "../icons.slint";
 import { LineEdit } from "std-widgets.slint";
 
@@ -31,175 +43,225 @@ export component ModuleCard inherits Rectangle {
     callback value-committed(string);          // numeric field accepted
     callback reset-pressed();
 
-    // ---- card chrome ----------------------------------------------------
-    background: Theme.panel;
+    // ---- strip chrome ----------------------------------------------------
+    // recessed sub-panel inside the rack: slightly darker than the rack
+    // surface, separated by a hairline on each side
+    background: #202329;
     border-width: 1px;
-    border-color: Theme.border;
+    border-color: #191C20;
     border-radius: Theme.radius-panel;
-    height: 172px;
 
-    // ---- header row -----------------------------------------------------
-    FlexboxLayout {
-        alignment: LayoutAlignment.stretch;
-        x: Theme.space-3; y: Theme.space-2;
-        width: parent.width - 2 * Theme.space-3;
-        flex-direction: Translations.rtl ? row-reverse : row;
-        spacing: Theme.space-2;
-
-        if root.icon-kind == 0: IconPitch {
-            width: 20px; height: 20px;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-        }
-        if root.icon-kind == 1: IconAir {
-            width: 20px; height: 20px;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-        }
-        if root.icon-kind == 2: IconFormant {
-            width: 20px; height: 20px;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-        }
-
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-family: Translations.font-family;
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            vertical-alignment: TextVerticalAlignment.center;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-            horizontal-stretch: 1;
-        }
-
-        ResetButton {
-            tooltip: @tr("Reset");
-            clicked => { root.reset-pressed(); }
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-        }
+    // left accent rule — the "channel color" cue, gold for all three
+    // vocal modules (one instrument, one color)
+    Rectangle {
+        x: 0; y: 8px;
+        width: 2px;
+        height: parent.height - 16px;
+        background: root.off-neutral ? Theme.accent : #34383E;
     }
+    property <bool> off-neutral: Math.abs(root.slider-value - root.neutral) > 0.000001;
 
-    // ---- value row: mono value + detail + editable field -----------------
-    FlexboxLayout {
-        alignment: LayoutAlignment.stretch;
-        x: Theme.space-3; y: 40px;
-        width: parent.width - 2 * Theme.space-3;
-        flex-direction: Translations.rtl ? row-reverse : row;
-        spacing: Theme.space-2;
+    // ---- content ----------------------------------------------------------
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
 
-        Text {
-            text: root.value-text;
-            color: Theme.accent;
-            font-family: Theme.font-mono;
-            font-size: 20px;
-            font-weight: 500;
-            vertical-alignment: TextVerticalAlignment.center;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
+        // header: LED + icon + title + reset
+        FlexboxLayout {
+            alignment: LayoutAlignment.stretch;
+            flex-direction: Translations.rtl ? row-reverse : row;
+            spacing: Theme.space-1;
+            height: 22px;
+
+            LedDot {
+                lit: root.off-neutral;
+                led-color: Theme.accent;
+                width: 7px; height: 7px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+
+            if root.icon-kind == 0: IconPitch {
+                width: 15px; height: 15px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+            if root.icon-kind == 1: IconAir {
+                width: 15px; height: 15px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+            if root.icon-kind == 2: IconFormant {
+                width: 15px; height: 15px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-family: Translations.font-family;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.8px;
+                vertical-alignment: TextVerticalAlignment.center;
+                horizontal-stretch: 1;
+                overflow: elide;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+
+            ResetButton {
+                tooltip: @tr("Reset");
+                clicked => { root.reset-pressed(); }
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
         }
-        Text {
-            text: root.unit;
-            color: Theme.text-2nd;
-            font-family: Theme.font-mono;
-            font-size: 12px;
-            vertical-alignment: TextVerticalAlignment.bottom;
-            cross-axis-self-alignment: CrossAxisAlignment.center;
-        }
-        Rectangle { height: 1px; vertical-stretch: 0; }
 
+        // value well: recessed readout, mono, gold digits
+        Rectangle {
+            height: 34px;
+            background: Theme.recess;
+            border-width: 1px;
+            border-color: #0D0F12;
+            border-radius: Theme.radius-control;
+
+            // inner top shadow
+            Rectangle {
+                x: 1px; y: 1px;
+                width: parent.width - 2px;
+                height: 2px;
+                background: #00000088;
+            }
+
+            FlexboxLayout {
+                alignment: LayoutAlignment.stretch;
+                x: 8px;
+                width: parent.width - 16px;
+                height: 100%;
+                flex-direction: Translations.rtl ? row-reverse : row;
+                spacing: 4px;
+                cross-axis-alignment: CrossAxisAlignment.center;
+
+                Text {
+                    text: root.value-text;
+                    color: root.off-neutral ? Theme.accent : Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: 19px;
+                    font-weight: 500;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: Translations.rtl
+                        ? TextHorizontalAlignment.right
+                        : TextHorizontalAlignment.left;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.unit;
+                    color: Theme.text-2nd;
+                    font-family: Theme.font-mono;
+                    font-size: 11px;
+                    vertical-alignment: TextVerticalAlignment.bottom;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+            }
+        }
+
+        // typed-precision field (compact)
         field := LineEdit {
-            width: 84px;
-            height: 26px;
-            font-size: 12px;
+            height: 24px;
+            font-size: 11px;
             input-type: InputType.decimal;
             text: root.value-text;
             accepted => { root.value-committed(self.text); }
-            cross-axis-self-alignment: CrossAxisAlignment.center;
         }
-    }
 
-    // ---- detail line ------------------------------------------------------
-    Text {
-        x: Theme.space-3; y: 70px;
-        width: parent.width - 2 * Theme.space-3;
-        text: root.detail-text;
-        color: Theme.text-2nd;
-        font-family: Theme.font-mono;
-        font-size: 11px;
-    }
-
-    // ---- slider -----------------------------------------------------------
-    PrecisionSlider {
-        x: Theme.space-3; y: 92px;
-        width: parent.width - 2 * Theme.space-3;
-        value: root.slider-value;
-        minimum: root.minimum;
-        maximum: root.maximum;
-        neutral: root.neutral;
-        step: root.step;
-        coarse-step: root.coarse-step;
-        changed(v) => { root.value-changed(v); }
-        reset-pressed() => { root.reset-pressed(); }
-    }
-
-    // ---- air live meter (applied gain from the engine telemetry) ----------
-    if root.show-meter: Rectangle {
-        x: Theme.space-3; y: 128px;
-        width: parent.width - 2 * Theme.space-3;
-        height: 10px;
-        border-radius: 5px;
-        background: Theme.raised;
-
-        // fill from center toward the value
-        Rectangle {
-            border-radius: 5px;
-            background: root.meter-percent < 0 ? Theme.warn : Theme.accent;
-            height: parent.height;
-            x: root.meter-percent < 0
-                ? parent.width * (0.5 + root.meter-percent / 200.0)
-                : parent.width * 0.5;
-            width: parent.width * Math.abs(root.meter-percent) / 200.0;
+        // the knob — primary control
+        Knob {
+            size: 66px;
+            value: root.slider-value;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            neutral: root.neutral;
+            step: root.step;
+            coarse-step: root.coarse-step;
+            changed(v) => { root.value-changed(v); }
+            reset-pressed() => { root.reset-pressed(); }
         }
-        // center tick
-        Rectangle {
-            x: parent.width / 2 - 1px;
-            width: 2px; height: parent.height;
-            background: Theme.text-muted;
-        }
-    }
 
-    // ---- vocal-tract glyph (formant module) --------------------------------
-    if root.show-tract: Rectangle {
-        x: Theme.space-3; y: 126px;
-        width: parent.width - 2 * Theme.space-3;
-        height: 14px;
-
-        // glottis block
-        Rectangle {
-            x: Translations.rtl ? parent.width - self.width : 0;
-            width: 8px; height: 6px; y: (parent.height - self.height) / 2;
-            background: Theme.text-muted;
+        // the fader — fine adjustment
+        PrecisionSlider {
+            value: root.slider-value;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            neutral: root.neutral;
+            step: root.step;
+            coarse-step: root.coarse-step;
+            changed(v) => { root.value-changed(v); }
+            reset-pressed() => { root.reset-pressed(); }
         }
-        // the tube: length tracks the perceived tract value
-        Rectangle {
-            x: Translations.rtl
-                ? parent.width - 10px - (parent.width - 24px) * root.tract-fraction
-                : 10px;
-            width: (parent.width - 24px) * root.tract-fraction;
-            height: 10px; y: (parent.height - self.height) / 2;
-            border-radius: 5px;
-            background: Theme.accent-dim;
+
+        // telemetry: detail line
+        Text {
+            text: root.detail-text;
+            color: Theme.text-2nd;
+            font-family: Theme.font-mono;
+            font-size: 10px;
+            wrap: word-wrap;
+            horizontal-stretch: 0;
+        }
+
+        // air live meter (applied duck gain from engine telemetry)
+        if root.show-meter: Rectangle {
+            height: 10px;
+            border-radius: 3px;
+            background: Theme.recess;
             border-width: 1px;
-            border-color: Theme.accent;
+            border-color: #0D0F12;
+
+            Rectangle {
+                border-radius: 3px;
+                background: root.meter-percent < 0 ? Theme.warn : Theme.accent;
+                height: parent.height - 2px;
+                y: 1px;
+                x: root.meter-percent < 0
+                    ? parent.width * (0.5 + root.meter-percent / 200.0)
+                    : parent.width * 0.5;
+                width: parent.width * Math.abs(root.meter-percent) / 200.0;
+            }
+            Rectangle {
+                x: parent.width / 2 - 1px;
+                width: 2px; height: parent.height;
+                background: Theme.text-muted;
+            }
         }
-        // lips
-        Rectangle {
-            x: Translations.rtl ? 0 : parent.width - self.width;
-            width: 4px; height: 14px;
-            background: Theme.text-muted;
+
+        // vocal-tract glyph (formant module)
+        if root.show-tract: Rectangle {
+            height: 14px;
+
+            Rectangle {   // glottis block
+                x: Translations.rtl ? parent.width - self.width : 0;
+                width: 8px; height: 6px; y: (parent.height - self.height) / 2;
+                background: Theme.text-muted;
+            }
+            Rectangle {   // the tube: length tracks the perceived tract value
+                x: Translations.rtl
+                    ? parent.width - 10px - (parent.width - 24px) * root.tract-fraction
+                    : 10px;
+                width: (parent.width - 24px) * root.tract-fraction;
+                height: 10px; y: (parent.height - self.height) / 2;
+                border-radius: 5px;
+                background: #3A3F45;
+                border-width: 1px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // lips
+                x: Translations.rtl ? 0 : parent.width - self.width;
+                width: 4px; height: 14px;
+                background: Theme.text-muted;
+            }
         }
     }
 
     // Rust pushes canonical field text after every value change (drag,
-    // reset, clamp, commit) — imperative set keeps the LineEdit binding free.
+    // knob, reset, clamp, commit) — imperative set keeps the LineEdit
+    // binding free.
     public function set-field-text(t: string) {
         field.text = t;
     }
