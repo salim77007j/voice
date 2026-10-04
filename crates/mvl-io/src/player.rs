@@ -657,4 +657,32 @@ mod tests {
         player.stop().unwrap();
         drop(player);
     }
+
+    /// Virtual-device smoke test — see
+    /// `recorder::tests::virtual_recorder_smoke` for the rationale: the
+    /// ALSA null PCM is un-paced, so the 0.5 s take may drain within
+    /// milliseconds and the wall-clock assertions of the real-hardware
+    /// test do not apply. Structural behaviour is still fully asserted:
+    /// open, negotiate, adapt, play/pause/stop transitions, position
+    /// bounds.
+    #[test]
+    fn virtual_player_smoke() {
+        if std::env::var("MVL_VIRTUAL_AUDIO").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set MVL_VIRTUAL_AUDIO=1 with a null ALSA device to enable");
+            return;
+        }
+        let audio = tone_audio(24_000, 48_000); // 0.5 s
+        let player = Player::new(&audio).expect("open virtual output device");
+        player.play().expect("play on virtual device");
+        std::thread::sleep(Duration::from_millis(50));
+        // Un-paced device: the take may already be finished — both are valid.
+        let pos = player.position_seconds();
+        let dur = audio.duration_seconds();
+        assert!(
+            pos <= dur + 0.05,
+            "position {pos} must stay within the take ({dur} s)"
+        );
+        player.pause().expect("pause");
+        player.stop().expect("stop");
+    }
 }

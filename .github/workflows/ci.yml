@@ -1,0 +1,139 @@
+# Micro-Vocal Lab — CI (Phase 5, plan §11)
+#
+# Jobs:
+#   lint     — cargo fmt --check + clippy -D warnings (ubuntu-24.04)
+#   test     — cargo test --workspace on 5 runners (ubuntu 22.04/24.04,
+#              windows, macos aarch64 + x86_64). The Linux legs also run the
+#              three virtual-audio smoke tests against an ALSA null PCM
+#              (MVL_VIRTUAL_AUDIO=1): the null plugin is un-paced, so those
+#              tests assert structure, not wall-clock timing — real-device
+#              timing stays covered by the #[ignore]d hardware tests on dev
+#              machines (plan §10.5) and the Phase 5 on-device kit.
+#   release  — cargo build --release + per-OS artifact upload. Runs only
+#              after lint+test pass. Linux artifacts are built on 22.04 to
+#              ship the older glibc (2.35) baseline.
+#
+# macOS artifacts are unsigned (documented constraint, §11): Gatekeeper
+# needs `xattr -cr <app>` or right-click-open on first run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ALSA dev package
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu-22.04, os: ubuntu-22.04 }
+          - { name: ubuntu-24.04, os: ubuntu-24.04 }
+          - { name: windows-latest, os: windows-latest }
+          - { name: macos-14-arm64, os: macos-14 }
+          - { name: macos-13-x86_64, os: macos-13 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ALSA dev package
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Virtual audio (ALSA null PCM) for device-path smoke tests
+        if: runner.os == 'Linux'
+        run: |
+          printf 'pcm.!default {\n    type null\n}\n' > ~/.asoundrc
+          echo "asoundrc:" && cat ~/.asoundrc
+      - name: cargo test (with virtual-audio smoke)
+        if: runner.os == 'Linux'
+        env:
+          MVL_VIRTUAL_AUDIO: '1'
+        run: cargo test --workspace
+      - name: cargo test
+        if: runner.os != 'Linux'
+        run: cargo test --workspace
+
+  release:
+    name: release (${{ matrix.name }})
+    needs: [lint, test]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            archive: micro-vocal-lab-linux-x86_64.tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            archive: micro-vocal-lab-windows-x86_64.zip
+          - name: macos-aarch64
+            os: macos-14
+            archive: micro-vocal-lab-macos-aarch64.tar.gz
+          - name: macos-x86_64
+            os: macos-13
+            archive: micro-vocal-lab-macos-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ALSA dev package
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: cargo build --release
+        run: cargo build --release --bin micro-vocal-lab
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/micro-vocal-lab dist/
+          cp LICENSE README.md dist/
+          tar czf "${{ matrix.archive }}" -C dist .
+          ls -la "${{ matrix.archive }}"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\micro-vocal-lab.exe dist\
+          Copy-Item LICENSE dist\
+          Copy-Item README.md dist\
+          Compress-Archive -Path dist\* -DestinationPath ${{ matrix.archive }}
+          Get-Item ${{ matrix.archive }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+          retention-days: 30

@@ -654,4 +654,40 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Virtual-device smoke test — runs against an UN-PACED ALSA null PCM in
+    /// CI (`MVL_VIRTUAL_AUDIO=1` + `~/.asoundrc` with `pcm.!default {
+    /// type null }`). The null plugin has no hardware clock (verified with a
+    /// C probe, Phase 5): capture delivers frames as fast as the callback
+    /// thread can pump, so the real-hardware duration/dropped-sample
+    /// assertions above do NOT apply. What this still proves end to end:
+    /// device enumeration, capability negotiation, stream build, callback
+    /// delivery, f32 conversion, ring transport, disk streaming and WAV
+    /// finalization — the full cpal/ALSA path, on every push.
+    #[test]
+    fn virtual_recorder_smoke() {
+        if std::env::var("MVL_VIRTUAL_AUDIO").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set MVL_VIRTUAL_AUDIO=1 with a null ALSA device to enable");
+            return;
+        }
+        let mut path = std::env::temp_dir();
+        path.push(format!("mvl_virtual_record_{}.wav", std::process::id()));
+        let recorder = Recorder::start(&path, RecordRequest::default())
+            .expect("virtual default input device should record");
+        let cfg = recorder.actual_config();
+        assert!(
+            cfg.sample_rate >= 44_100,
+            "negotiation must not fall below the 44.1 kHz floor (got {cfg:?})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let stats = recorder.stop().expect("stop must finalize");
+        assert_eq!(stats.sample_rate, cfg.sample_rate);
+        assert_eq!(stats.channels, cfg.channels);
+        assert!(
+            stats.frames > 0,
+            "un-paced capture must still produce frames"
+        );
+        assert!(path.exists(), "WAV must exist after stop");
+        let _ = std::fs::remove_file(&path);
+    }
 }

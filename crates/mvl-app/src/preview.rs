@@ -809,4 +809,37 @@ mod tests {
         player.pause().unwrap();
         drop(player);
     }
+
+    /// Virtual-device smoke test — see
+    /// `mvl_io::recorder::tests::virtual_recorder_smoke` for the rationale
+    /// (un-paced ALSA null PCM in CI). Exercises the whole preview path —
+    /// Preview-profile engine construction inside the feeder thread, ring
+    /// transport, cpal stream — without wall-clock assumptions.
+    #[test]
+    fn virtual_preview_smoke() {
+        if std::env::var("MVL_VIRTUAL_AUDIO").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set MVL_VIRTUAL_AUDIO=1 with a null ALSA device to enable");
+            return;
+        }
+        let src = voiced_like(24_000, 48_000); // 0.5 s
+        let player = PreviewPlayer::new(&src).expect("open virtual output device");
+        player
+            .set_params(VocalParams {
+                pitch_semitones: 3.0,
+                air_percent: 20,
+                ..VocalParams::neutral()
+            })
+            .expect("set params");
+        player
+            .play()
+            .expect("play through the engine on a virtual device");
+        std::thread::sleep(Duration::from_millis(50));
+        let pos = player.position_seconds();
+        let dur = src.duration_seconds();
+        assert!(
+            pos <= dur + 0.05,
+            "position {pos} must stay within the take ({dur} s)"
+        );
+        player.pause().expect("pause");
+    }
 }
