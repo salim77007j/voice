@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/mvl-core", "crates/mvl-io", "crates/mvl-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0-only"
+repository = "https://github.com/salim77007j/voice"
+authors = ["Micro-Vocal Lab contributors"]
+
+[workspace.dependencies]
+thiserror = "2"
+cpal = "0.18"
+hound = "3.5"
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "wav", "pcm"] }
+mp3lame-encoder = "0.2"
+rubato = "5"
+rtrb = "0.4"
+crossbeam-channel = "0.5"
+
+# Size-optimized release profile (see docs/ARCHITECTURE_PLAN.md §9).
+# panic unwind is kept (default) so audio backends can catch panics in
+# callbacks; revisit at Phase 6 if size budget demands it.
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = 3

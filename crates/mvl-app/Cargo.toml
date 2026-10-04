@@ -1,0 +1,17 @@
+[package]
+name = "mvl-app"
+description = "Micro-Vocal Lab application (Slint UI lands in Phase 4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "micro-vocal-lab"
+path = "src/main.rs"
+
+[dependencies]
+mvl-core = { path = "../mvl-core" }
+mvl-io = { path = "../mvl-io" }

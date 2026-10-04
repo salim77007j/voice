@@ -1,0 +1,20 @@
+[package]
+name = "mvl-io"
+description = "Micro-Vocal Lab audio I/O: recording (cpal), WAV/MP3 import-export, playback, resampling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvl-core = { path = "../mvl-core" }
+thiserror.workspace = true
+cpal.workspace = true
+hound.workspace = true
+symphonia.workspace = true
+mp3lame-encoder.workspace = true
+rubato.workspace = true
+rtrb.workspace = true
+crossbeam-channel.workspace = true
