@@ -30,8 +30,16 @@ pitch-detection = "0.3"
 # Size-optimized release profile (see docs/ARCHITECTURE_PLAN.md §9).
 # panic unwind is kept (default) so audio backends can catch panics in
 # callbacks; revisit at Phase 6 if size budget demands it.
+# Phase 5 size pass: fat LTO + codegen-units=1 measured 28.0 MB → 21.4 MB
+# (−24 %) vs thin LTO. The remaining big blocks are structural and
+# documented in docs/PHASE_5_REPORT.md: the femtovg renderer hard-depends
+# on i-slint-core's `svg` + `image-decoders` features (resvg stack,
+# ~1.5 MiB .text), and zbus (~1.4 MiB) is shared by accessibility
+# (accesskit/AT-SPI) and the xdg-portal file dialogs — both are product
+# features, not removable weight.
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 strip = true
 opt-level = 3
 
