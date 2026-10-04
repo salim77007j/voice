@@ -10,3 +10,10 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# DSP stack (architecture plan §3 / §6): realfft for STFT + cepstral work
+# (rustfft underneath), pitch-detection for YIN F0 tracking, rubato for the
+# pitch path's windowed-sinc ratio conversion.
+realfft = "3.5"
+rustfft = "6.4"
+pitch-detection = "0.3"
+rubato.workspace = true

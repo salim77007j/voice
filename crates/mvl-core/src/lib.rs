@@ -5,10 +5,13 @@
 //! `f32` signal in / signal out so the whole engine is unit-testable
 //! headless in CI.
 //!
-//! Phase 2 scope: parameter model shared by the I/O layer, transport and
-//! the (Phase 3) processing chain. The processing modules land in Phase 3
-//! per `docs/ARCHITECTURE_PLAN.md` §6.
+//! Phase 3 scope (plan §6): the processing chain — shared STFT analysis,
+//! frame classification, pitch (phase-locked phase vocoder), formant
+//! (true-envelope warp) and air/breath engine, assembled by the
+//! VocalEngine (landing later in Phase 3).
 
 pub mod params;
+pub mod stft;
 
 pub use params::{QualityProfile, VocalParams};
+pub use stft::{AnalysisFrame, OverlapAdder, StftAnalyzer};

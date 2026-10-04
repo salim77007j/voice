@@ -23,6 +23,9 @@ mp3lame-encoder = "0.2"
 rubato = "5"
 rtrb = "0.4"
 crossbeam-channel = "0.5"
+realfft = "3.5"
+rustfft = "6.4"
+pitch-detection = "0.3"
 
 # Size-optimized release profile (see docs/ARCHITECTURE_PLAN.md §9).
 # panic unwind is kept (default) so audio backends can catch panics in
