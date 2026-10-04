@@ -1,0 +1,196 @@
+// Waveform canvas (plan §8.4).
+//
+// The peak image itself (min/max/RMS from the mipmap) is rendered offscreen
+// in Rust into a SharedPixelBuffer and shown as a plain Image. The playhead,
+// selection, hover crosshair and time ruler are lightweight overlay elements,
+// so 60 fps playback never re-renders the waveform image.
+//
+// The timeline itself always flows left→right (universal media convention,
+// also in RTL locales); only the surrounding chrome mirrors.
+
+import { Theme } from "../theme.slint";
+import { Translations } from "../translations.slint";
+
+export struct RulerTick {
+    fraction: float,   // 0..1 across the canvas width
+    label: string,
+    major: bool,
+}
+
+export component WaveformView inherits Rectangle {
+    // ---- data (all in seconds; positions are computed here in .slint) ----
+    in property <image> wave;
+    in property <bool> has-audio: false;
+    in property <float> view-start: 0;
+    in property <float> view-end: 1;
+    in property <float> playhead: 0;
+    in property <bool> show-playhead: false;
+    in property <bool> has-selection: false;
+    in property <float> sel-start: 0;
+    in property <float> sel-end: 0;
+    in property <[RulerTick]> ticks;
+    in property <string> empty-hint;
+    in property <bool> sample-level: false;
+
+    // ---- outgoing ----
+    callback seek-seconds(float);           // click / scrub
+    callback zoom-at(float, int);           // (fraction, wheel direction)
+    callback select-seconds(float, float);  // shift-drag completed
+    callback canvas-resized();
+    out property <length> canvas-width: canvas.width;
+    out property <length> canvas-height: canvas.height;
+
+    background: Theme.panel;
+    clip: true;
+
+    property <length> ruler-height: 24px;
+
+    // ---- time ruler -----------------------------------------------------
+    Rectangle {
+        x: 0; y: 0; width: parent.width; height: root.ruler-height;
+        background: Theme.raised;
+
+        HorizontalLayout {
+            padding-left: Theme.space-2; padding-right: Theme.space-2;
+            Text {
+                text: root.sample-level ? @tr("sample level") : @tr("time");
+                color: Theme.text-muted;
+                font-family: Theme.font-mono;
+                font-size: 10px;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+        }
+
+        // ticks
+        for t[i] in root.ticks: Rectangle {
+            x: parent.width * t.fraction;
+            y: 0;
+            width: 1px;
+            height: t.major ? parent.height : parent.height * 0.4;
+            background: Theme.border;
+        }
+        for t[i] in root.ticks: Text {
+            x: parent.width * t.fraction + 3px;
+            y: parent.height - self.height - 2px;
+            text: t.label;
+            color: Theme.text-2nd;
+            font-family: Theme.font-mono;
+            font-size: 10px;
+        }
+    }
+
+    // ---- canvas ---------------------------------------------------------
+    canvas := Rectangle {
+        y: root.ruler-height;
+        height: parent.height - root.ruler-height;
+        x: 0; width: parent.width;
+
+        changed width => { root.canvas-resized(); }
+
+        // waveform image (transparent background; panel shows through)
+        Image {
+            x: 0; y: 0; width: 100%; height: 100%;
+            image-fit: ImageFit.fill;
+            source: root.wave;
+        }
+
+        // center guide line (subtle)
+        Rectangle {
+            x: 0; y: parent.height / 2; width: parent.width; height: 1px;
+            background: #FFFFFF0A;
+        }
+
+        // selection overlay (teal @ 18 %) with edge markers
+        Rectangle {
+            visible: root.has-selection;
+            x: parent.width * ((root.sel-start - root.view-start) / (root.view-end - root.view-start));
+            width: parent.width * ((root.sel-end - root.sel-start) / (root.view-end - root.view-start));
+            y: 0; height: parent.height;
+            background: Theme.accent-soft;
+            Rectangle {
+                x: 0; y: 0; width: 1px; height: parent.height;
+                background: Theme.accent-dim;
+            }
+            Rectangle {
+                x: parent.width - 1px; y: 0; width: 1px; height: parent.height;
+                background: Theme.accent-dim;
+            }
+        }
+
+        // playhead: 2 px line + soft core glow (brighter core near playhead)
+        Rectangle {
+            visible: root.show-playhead;
+            x: parent.width * ((root.playhead - root.view-start) / (root.view-end - root.view-start)) - self.width / 2;
+            y: 0; height: parent.height;
+            width: 2px;
+            background: Theme.accent;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #2DD4BF88;
+        }
+        Rectangle {
+            visible: root.show-playhead;
+            x: parent.width * ((root.playhead - root.view-start) / (root.view-end - root.view-start)) - self.width / 2;
+            y: 0; height: parent.height;
+            width: 22px;
+            background: @linear-gradient(90deg, #2DD4BF00 0%, #2DD4BF2E 50%, #2DD4BF00 100%);
+        }
+
+        // hover crosshair
+        Rectangle {
+            visible: ta.has-hover && root.has-audio;
+            x: ta.mouse-x - self.width / 2;
+            y: 0; height: parent.height;
+            width: 1px;
+            background: #FFFFFF26;
+        }
+
+        // empty-state hint
+        Text {
+            visible: !root.has-audio;
+            text: root.empty-hint;
+            color: Theme.text-muted;
+            font-family: Translations.font-family;
+            font-size: 15px;
+            width: parent.width; height: parent.height;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        // ---- interaction ------------------------------------------------
+        ta := TouchArea {
+            property <bool> selecting: false;
+            property <float> select-anchor: 0;
+
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                    if (ev.modifiers.shift) {
+                        self.selecting = true;
+                        self.select-anchor = seconds-at(self.mouse-x);
+                    }
+                } else if (ev.kind == PointerEventKind.up) {
+                    if (self.selecting) {
+                        let a = self.select-anchor;
+                        let b = seconds-at(self.mouse-x);
+                        root.select-seconds(Math.min(a, b), Math.max(a, b));
+                        self.selecting = false;
+                    }
+                }
+            }
+            moved => {
+                if (self.pressed && !self.selecting) {
+                    root.seek-seconds(seconds-at(self.mouse-x));
+                }
+            }
+            scroll-event(ev) => {
+                let dir = ev.delta_y > 0 ? -1 : 1;
+                root.zoom-at(self.mouse-x / self.width, dir);
+                return accept;
+            }
+
+            function seconds-at(px: length) -> float {
+                let f = px / self.width;
+                return root.view-start + f * (root.view-end - root.view-start);
+            }
+        }
+    }
+}

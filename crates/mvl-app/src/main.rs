@@ -1,10 +1,13 @@
 //! Micro-Vocal Lab application binary.
 //!
-//! Phase 3: boot self-check plus a `process` subcommand that runs the
-//! full DSP engine over an audio file — the same engine the Phase 4
-//! UI will drive, exercisable from the command line (and the tool that
-//! produced the committed `samples/` before/after material).
+//! Subcommands:
+//! * *(default)* `run [file]` — the desktop UI (winit + femtovg)
+//! * `process <in> <out> [options]` — headless DSP render (Phase 3 CLI)
+//! * `screenshot <out.png> [file] [options]` — offscreen UI render for
+//!   verification (the same UI code, software renderer, no display needed)
+//! * `self-check` — boot diagnostics
 
+use mvl_app::{controller::Controller, headless};
 use mvl_core::{QualityProfile, VocalEngine, VocalParams};
 use mvl_io::{InterleavedAudio, WavDepth};
 
@@ -12,14 +15,186 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("process") => process_command(&args[2..]),
-        _ => self_check(),
+        Some("screenshot") => screenshot_command(&args[2..]),
+        Some("self-check") => self_check(),
+        Some("run") => run_command(&args[2..]),
+        Some("--help") | Some("-h") | Some("help") => usage(),
+        _ => run_command(&args[1..]),
     }
 }
+
+fn usage() {
+    println!(
+        "Micro-Vocal Lab {}\n\
+         \n\
+         USAGE:\n\
+             micro-vocal-lab [run] [FILE]      desktop UI (optionally loads FILE)\n\
+             micro-vocal-lab process IN OUT [--pitch ST] [--air %] [--tract MM] [--profile preview|render]\n\
+             micro-vocal-lab screenshot OUT.png [FILE] [--pitch ST] [--air %] [--tract MM]\n\
+                                            [--locale en|ar] [--width PX] [--height PX] [--playhead SEC]\n\
+             micro-vocal-lab self-check",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// run — the desktop UI
+// ---------------------------------------------------------------------------
+
+fn run_command(args: &[String]) {
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .map(std::path::PathBuf::from);
+
+    let app = match mvl_app::AppWindow::new() {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("error: cannot open a window on this machine: {e}");
+            eprintln!("hint: for headless verification use `micro-vocal-lab screenshot out.png`");
+            std::process::exit(1);
+        }
+    };
+    let controller = Controller::new(app);
+    if let Some(path) = file {
+        controller.load_path(path);
+    }
+    if let Err(e) = controller.run() {
+        eprintln!("error: event loop: {e}");
+        std::process::exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// screenshot — headless UI render
+// ---------------------------------------------------------------------------
+
+fn screenshot_command(args: &[String]) {
+    let mut output: Option<String> = None;
+    let mut input: Option<String> = None;
+    let mut params = VocalParams::neutral();
+    let mut locale = "en".to_string();
+    let mut width = 1280u32;
+    let mut height = 800u32;
+    let mut playhead: Option<f64> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        match a.as_str() {
+            "--pitch" => {
+                i += 1;
+                params.pitch_semitones =
+                    args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("error: --pitch needs a number");
+                        std::process::exit(2);
+                    });
+            }
+            "--air" => {
+                i += 1;
+                params.air_percent =
+                    args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("error: --air needs a number");
+                        std::process::exit(2);
+                    });
+            }
+            "--tract" => {
+                i += 1;
+                params.tract_mm = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("error: --tract needs a number");
+                    std::process::exit(2);
+                });
+            }
+            "--locale" => {
+                i += 1;
+                locale = args.get(i).cloned().unwrap_or_else(|| {
+                    eprintln!("error: --locale needs a value (en|ar)");
+                    std::process::exit(2);
+                });
+            }
+            "--width" => {
+                i += 1;
+                width = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("error: --width needs a number");
+                    std::process::exit(2);
+                });
+            }
+            "--height" => {
+                i += 1;
+                height = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("error: --height needs a number");
+                    std::process::exit(2);
+                });
+            }
+            "--playhead" => {
+                i += 1;
+                playhead = args.get(i).and_then(|v| v.parse().ok());
+            }
+            other if output.is_none() && other.ends_with(".png") => {
+                output = Some(other.to_string())
+            }
+            other if input.is_none() => input = Some(other.to_string()),
+            other => {
+                eprintln!("error: unexpected argument '{other}'");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let Some(output) = output else {
+        eprintln!("usage: micro-vocal-lab screenshot OUT.png [FILE] [options]");
+        std::process::exit(2);
+    };
+
+    headless::install();
+    let app = mvl_app::AppWindow::new().expect("headless component");
+    let controller = Controller::new(app);
+    if let Some(path) = input {
+        let path = std::path::PathBuf::from(path);
+        match mvl_io::import(&path) {
+            Ok(audio) => {
+                let name = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "audio".into());
+                controller.load_audio_sync(audio, name);
+            }
+            Err(e) => {
+                eprintln!("error: import {path:?}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if locale == "ar" {
+        // go through the controller so the global + translations both flip
+        let app = controller.window();
+        app.invoke_set_language("ar".into());
+    }
+    controller.set_params(params);
+    if let Some(ph) = playhead {
+        let app = controller.window();
+        app.set_playhead(ph as f32);
+        app.set_show_playhead(true);
+    }
+
+    let size = slint::PhysicalSize::new(width, height);
+    match headless::render_to_png(controller.window(), size, std::path::Path::new(&output)) {
+        Ok(()) => println!("wrote {output} ({width}x{height})"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// process — headless DSP render (unchanged from Phase 3)
+// ---------------------------------------------------------------------------
 
 fn self_check() {
     let params = VocalParams::neutral();
     println!(
-        "Micro-Vocal Lab {} — phase 3 (DSP engine)",
+        "Micro-Vocal Lab {} — phase 4 (UI)",
         env!("CARGO_PKG_VERSION")
     );
     println!(
@@ -37,7 +212,9 @@ fn self_check() {
         "codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME {})",
         mvl_io::mp3::lame_version()
     );
-    println!("usage: micro-vocal-lab process <in.wav> <out.wav> [--pitch ST] [--air %] [--tract MM] [--profile preview|render]");
+    let slint_version = "1.18.1";
+    println!("ui: slint {slint_version} (fluent-dark, embedded IBM Plex, EN/ar + RTL)");
+    println!("usage: micro-vocal-lab [run|process|screenshot|self-check] ...");
 }
 
 /// Smoke render used by the boot self-check.

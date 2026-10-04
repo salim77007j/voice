@@ -1,0 +1,512 @@
+// Micro-Vocal Lab — main window (plan §8.2).
+//
+// Layout (LTR default; mirrors under RTL except the transport cluster and
+// the timeline itself — universal media conventions):
+//   toolbar  ·  [ transport · waveform canvas ]  +  [ 3 precision modules ]  ·  status bar
+//
+// All strings go through @tr() — the English source strings are the
+// default, the Arabic catalog ships in translations/ar/LC_MESSAGES.
+
+import { Theme } from "theme.slint";
+import { Translations } from "translations.slint";
+// re-export so the controller can reach the global from Rust
+export { Translations } from "translations.slint";
+import { IconPlay, IconPause, IconStop, IconRewind, IconRecordDot,
+         IconImport, IconExport, IconZoomIn, IconZoomOut, IconFit } from "icons.slint";
+import { TextButton, IconButtonBase } from "widgets/buttons.slint";
+import { WaveformView, RulerTick } from "widgets/waveform-view.slint";
+import { ModuleCard } from "widgets/module-card.slint";
+
+// Embedded fonts (OFL, docs §8.7) — registered on component creation.
+import "../assets/fonts/IBMPlexSans-Regular.ttf";
+import "../assets/fonts/IBMPlexSans-Medium.ttf";
+import "../assets/fonts/IBMPlexSans-SemiBold.ttf";
+import "../assets/fonts/IBMPlexSansArabic-Regular.ttf";
+import "../assets/fonts/IBMPlexSansArabic-Medium.ttf";
+import "../assets/fonts/IBMPlexSansArabic-SemiBold.ttf";
+import "../assets/fonts/IBMPlexMono-Regular.ttf";
+import "../assets/fonts/IBMPlexMono-Medium.ttf";
+
+export component AppWindow inherits Window {
+    default-font-family: Translations.font-family;
+    default-font-size: 13px;
+    title: @tr("Micro-Vocal Lab");
+    background: Theme.bg-base;
+    min-width: 1080px;
+    min-height: 660px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+
+    // ================= state published by the Rust controller ============
+
+    // session
+    in-out property <bool> has-audio: false;
+    in-out property <string> file-name: "";
+    in-out property <string> position-text: "00:00:00.000";
+    in-out property <string> duration-text: "00:00:00.000";
+    in-out property <string> rate-text: "—";
+    in-out property <string> depth-text: "—";
+    in-out property <string> preview-latency-text: "";
+
+    // transport / capture
+    in-out property <bool> playing: false;
+    in-out property <bool> paused: false;
+    in-out property <bool> recording: false;
+    in-out property <string> recording-elapsed: "00:00";
+
+    // status (key + preformatted, locale-neutral args)
+    in-out property <string> status-key: "no-audio";
+    in-out property <string> status-a1: "";
+    in-out property <string> status-a2: "";
+    in-out property <bool> busy: false;          // render/export/import running
+    in-out property <int> export-progress: 0;
+
+    // waveform view state
+    in-out property <image> wave;
+    in-out property <float> view-start: 0;
+    in-out property <float> view-end: 1;
+    in-out property <float> playhead: 0;
+    in-out property <bool> show-playhead: false;
+    in-out property <bool> has-selection: false;
+    in-out property <float> sel-start: 0;
+    in-out property <float> sel-end: 0;
+    in-out property <[RulerTick]> ticks;
+    in-out property <bool> sample-level: false;
+    // canvas size (logical px) so the controller can re-render the peak
+    // image at the right resolution
+    out property <length> canvas-width: wf.canvas-width;
+    out property <length> canvas-height: wf.canvas-height;
+
+    // module values (canonical, Rust-owned)
+    in-out property <float> pitch-semitones: 0;
+    in-out property <int> air-percent: 0;
+    in-out property <float> tract-mm: 170;
+    in-out property <string> pitch-value-text: "+0.00";
+    in-out property <string> pitch-detail-text: "";
+    in-out property <string> air-value-text: "0.0";
+    in-out property <string> air-detail-text: "";
+    in-out property <int> air-meter-percent: 0;
+    in-out property <string> tract-value-text: "170";
+    in-out property <string> tract-detail-text: "";
+
+    // ================= actions back into the controller ==================
+
+    callback new-recording-clicked();
+    callback import-clicked();
+    callback export-clicked();
+    callback rewind-clicked();
+    callback play-pause-clicked();
+    callback stop-clicked();
+    callback seek-seconds(float);
+    callback zoom-at(float, int);
+    callback zoom-fit-clicked();
+    callback select-seconds(float, float);
+    callback canvas-resized();
+    callback set-pitch(float);
+    callback set-air(float);
+    callback set-tract(float);
+    callback commit-pitch-text(string);
+    callback commit-air-text(string);
+    callback commit-tract-text(string);
+    callback reset-pitch();
+    callback reset-air();
+    callback reset-tract();
+    callback set-language(string);
+
+    // ================= layout ============================================
+
+    VerticalLayout {
+        spacing: 0;
+
+        // ---- toolbar ----------------------------------------------------
+        Rectangle {
+            height: Theme.toolbar-height;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            FlexboxLayout {
+                alignment: LayoutAlignment.stretch;
+                x: Theme.space-4; y: 0;
+                width: parent.width - 2 * Theme.space-4;
+                height: parent.height;
+                flex-direction: Translations.rtl ? row-reverse : row;
+                spacing: Theme.space-3;
+                cross-axis-alignment: CrossAxisAlignment.center;
+
+                // app identity
+                Rectangle {
+                    width: 10px; height: 10px; border-radius: 5px;
+                    background: @radial-gradient(circle, Theme.accent 30%, Theme.accent-dim 100%);
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Text {
+                    text: "Micro-Vocal Lab";
+                    color: Theme.text;
+                    font-family: Translations.font-family;
+                    font-size: 14px;
+                    font-weight: 600;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Rectangle { width: 12px; height: 1px; cross-axis-self-alignment: CrossAxisAlignment.center; }
+
+                // record
+                TextButton {
+                    text: root.recording ? @tr("Stop Recording") : @tr("New Recording");
+                    tooltip: root.recording ? @tr("Stop Recording") : @tr("New Recording");
+                    danger: root.recording;
+                    enabled: !root.busy;
+                    clicked => { root.new-recording-clicked(); }
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+
+                    IconRecordDot {
+                        width: 10px; height: 10px;
+                        live: root.recording;
+                        x: 8px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // import
+                TextButton {
+                    text: @tr("Import File");
+                    tooltip: @tr("Import File");
+                    enabled: !root.busy && !root.recording;
+                    clicked => { root.import-clicked(); }
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+
+                    IconImport {
+                        width: 15px; height: 15px;
+                        x: 9px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // export (primary teal)
+                TextButton {
+                    text: @tr("Export");
+                    tooltip: @tr("Export the processed audio");
+                    primary: true;
+                    enabled: root.has-audio && !root.busy && !root.recording;
+                    clicked => { root.export-clicked(); }
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+
+                    IconExport {
+                        width: 15px; height: 15px;
+                        x: 9px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+            }
+        }
+
+        // ---- main area ---------------------------------------------------
+        FlexboxLayout {
+            flex-direction: Translations.rtl ? row-reverse : row;
+            alignment: LayoutAlignment.stretch;
+            cross-axis-alignment: CrossAxisAlignment.stretch;
+
+            // center: transport + waveform
+            VerticalLayout {
+                spacing: 0;
+                horizontal-stretch: 1;
+
+                // transport bar (intentionally LTR in RTL locales: media
+                // convention — transport glyphs keep their direction)
+                Rectangle {
+                    height: Theme.transport-height;
+                    background: Theme.bg-base;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    HorizontalLayout {
+                        x: Theme.space-3; y: 0;
+                        width: parent.width - 2 * Theme.space-3;
+                        height: parent.height;
+                        spacing: Theme.space-2;
+                        cross-axis-alignment: CrossAxisAlignment.center;
+
+                        IconButtonBase {
+                            tooltip: @tr("Rewind to start");
+                            enabled: root.has-audio;
+                            clicked => { root.rewind-clicked(); }
+                            IconRewind { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+                        IconButtonBase {
+                            tooltip: root.playing ? @tr("Pause") : @tr("Play");
+                            enabled: root.has-audio;
+                            accent: Theme.play;
+                            clicked => { root.play-pause-clicked(); }
+                            if root.playing: IconPause { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                            if !root.playing: IconPlay { width: 18px; height: 18px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+                        IconButtonBase {
+                            tooltip: @tr("Stop");
+                            enabled: root.has-audio;
+                            clicked => { root.stop-clicked(); }
+                            IconStop { width: 16px; height: 16px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+
+                        Rectangle { width: 12px; height: 1px; cross-axis-self-alignment: CrossAxisAlignment.center; }
+
+                        IconButtonBase {
+                            size: 30px;
+                            tooltip: @tr("Zoom out");
+                            enabled: root.has-audio;
+                            clicked => { root.zoom-at(0.5, -1); }
+                            IconZoomOut { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+                        IconButtonBase {
+                            size: 30px;
+                            tooltip: @tr("Zoom in");
+                            enabled: root.has-audio;
+                            clicked => { root.zoom-at(0.5, 1); }
+                            IconZoomIn { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+                        IconButtonBase {
+                            size: 30px;
+                            tooltip: @tr("Fit whole file");
+                            enabled: root.has-audio;
+                            clicked => { root.zoom-fit-clicked(); }
+                            IconFit { width: 15px; height: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                        }
+
+                        Rectangle { height: 1px; horizontal-stretch: 1; }
+
+                        // timecode (mono, tabular)
+                        Text {
+                            text: root.position-text;
+                            color: Theme.text;
+                            font-family: Theme.font-mono;
+                            font-size: 15px;
+                            font-weight: 500;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            cross-axis-self-alignment: CrossAxisAlignment.center;
+                        }
+                        Text {
+                            text: "──";
+                            color: Theme.text-muted;
+                            font-family: Theme.font-mono;
+                            font-size: 13px;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            cross-axis-self-alignment: CrossAxisAlignment.center;
+                        }
+                        Text {
+                            text: root.duration-text;
+                            color: Theme.text-2nd;
+                            font-family: Theme.font-mono;
+                            font-size: 15px;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            cross-axis-self-alignment: CrossAxisAlignment.center;
+                        }
+                        Text {
+                            text: root.rate-text;
+                            color: Theme.text-muted;
+                            font-family: Theme.font-mono;
+                            font-size: 12px;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            cross-axis-self-alignment: CrossAxisAlignment.center;
+                        }
+                    }
+                }
+
+                // waveform canvas (fills the rest)
+                wf := WaveformView {
+                    wave: root.wave;
+                    has-audio: root.has-audio;
+                    view-start: root.view-start;
+                    view-end: root.view-end;
+                    playhead: root.playhead;
+                    show-playhead: root.show-playhead;
+                    has-selection: root.has-selection;
+                    sel-start: root.sel-start;
+                    sel-end: root.sel-end;
+                    ticks: root.ticks;
+                    sample-level: root.sample-level;
+                    empty-hint: @tr("No audio loaded — import a file or record");
+                    seek-seconds(t) => { root.seek-seconds(t); }
+                    zoom-at(f, d) => { root.zoom-at(f, d); }
+                    select-seconds(a, b) => { root.select-seconds(a, b); }
+                    canvas-resized() => { root.canvas-resized(); }
+                }
+            }
+
+            // side panel: the three precision modules
+            Rectangle {
+                width: Theme.side-panel-width;
+                background: Theme.bg-base;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: Theme.space-3;
+                    spacing: Theme.space-3;
+
+                    pitch-card := ModuleCard {
+                        icon-kind: 0;
+                        title: @tr("Pitch");
+                        unit: @tr("st");
+                        value-text: root.pitch-value-text;
+                        detail-text: root.pitch-detail-text;
+                        slider-value: root.pitch-semitones;
+                        minimum: -12; maximum: 12; neutral: 0;
+                        step: 0.01; coarse-step: 0.1;
+                        value-changed(v) => { root.set-pitch(v); }
+                        value-committed(t) => { root.commit-pitch-text(t); }
+                        reset-pressed() => { root.reset-pitch(); }
+                    }
+                    air-card := ModuleCard {
+                        icon-kind: 1;
+                        title: @tr("Air & Breath");
+                        unit: @tr("dB");
+                        value-text: root.air-value-text;
+                        detail-text: root.air-detail-text;
+                        slider-value: root.air-percent;
+                        minimum: -100; maximum: 100; neutral: 0;
+                        step: 0.5; coarse-step: 5;
+                        show-meter: true;
+                        meter-percent: root.air-meter-percent;
+                        value-changed(v) => { root.set-air(v); }
+                        value-committed(t) => { root.commit-air-text(t); }
+                        reset-pressed() => { root.reset-air(); }
+                    }
+                    formant-card := ModuleCard {
+                        icon-kind: 2;
+                        title: @tr("Formant");
+                        unit: @tr("mm");
+                        value-text: root.tract-value-text;
+                        detail-text: root.tract-detail-text;
+                        slider-value: root.tract-mm;
+                        minimum: 100; maximum: 260; neutral: 170;
+                        step: 1; coarse-step: 10;
+                        show-tract: true;
+                        tract-fraction: (root.tract-mm - 100) / 160;
+                        value-changed(v) => { root.set-tract(v); }
+                        value-committed(t) => { root.commit-tract-text(t); }
+                        reset-pressed() => { root.reset-tract(); }
+                    }
+                }
+            }
+        }
+
+        // ---- status bar ---------------------------------------------------
+        Rectangle {
+            height: Theme.statusbar-height;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            FlexboxLayout {
+                alignment: LayoutAlignment.stretch;
+                x: Theme.space-3; y: 0;
+                width: parent.width - 2 * Theme.space-3;
+                height: parent.height;
+                flex-direction: Translations.rtl ? row-reverse : row;
+                spacing: Theme.space-3;
+                cross-axis-alignment: CrossAxisAlignment.center;
+
+                // state dot: red = recording, green = playing, amber = paused
+                Rectangle {
+                    width: 8px; height: 8px; border-radius: 4px;
+                    background: root.recording ? Theme.record
+                        : root.playing ? Theme.play
+                        : root.paused ? Theme.warn
+                        : Theme.text-muted;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                Text {
+                    text: status-text();
+                    color: Theme.text-2nd;
+                    font-family: Translations.font-family;
+                    font-size: 12px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                Rectangle { height: 1px; horizontal-stretch: 1; }
+
+                if root.preview-latency-text != "": Text {
+                    text: root.preview-latency-text;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 11px;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+
+                // language switcher: EN | عربي (native names, not translated)
+                TextButton {
+                    text: "EN";
+                    min-w: 40px;
+                    active: Translations.locale == "en";
+                    tooltip: "English";
+                    clicked => { root.set-language("en"); }
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                Text {
+                    text: "|";
+                    color: Theme.text-muted;
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+                TextButton {
+                    text: "عربي";
+                    min-w: 48px;
+                    active: Translations.locale == "ar";
+                    tooltip: "العربية";
+                    clicked => { root.set-language("ar"); }
+                    cross-axis-self-alignment: CrossAxisAlignment.center;
+                }
+            }
+        }
+    }
+
+    // ================= window-level keyboard shortcuts ====================
+
+    FocusScope {
+        width: 0px; height: 0px;   // zero-size: keyboard only, no layout impact
+        key-pressed(ev) => {
+            if (ev.text == Key.Space) {
+                if (root.has-audio) {
+                    root.play-pause-clicked();
+                    return accept;
+                }
+            }
+            return reject;
+        }
+    }
+
+    // ================= Rust helpers =======================================
+
+    // Canonical text for the editable value fields, pushed by the controller
+    // after every value change so parse failures restore the true value.
+    public function set-pitch-field(t: string) { pitch-card.set-field-text(t); }
+    public function set-air-field(t: string) { air-card.set-field-text(t); }
+    public function set-tract-field(t: string) { formant-card.set-field-text(t); }
+
+    function status-text() -> string {
+        if (status-key == "recording") {
+            return @tr("Recording") + " " + root.status-a1 + " · " + root.status-a2;
+        } else if (status-key == "rendering") {
+            return @tr("Rendering") + " " + root.export-progress + " %";
+        } else if (status-key == "exported") {
+            return @tr("Exported") + " " + root.status-a1 + " (" + root.status-a2 + "× " + @tr("realtime") + ")";
+        } else if (status-key == "import-error") {
+            return @tr("Import failed") + ": " + root.status-a1;
+        } else if (status-key == "export-error") {
+            return @tr("Export failed") + ": " + root.status-a1;
+        } else if (status-key == "no-input-device") {
+            return @tr("No audio input device found");
+        } else if (status-key == "no-output-device") {
+            return @tr("No audio output device found");
+        } else if (status-key == "no-audio") {
+            return @tr("No audio loaded — import a file or record");
+        } else if (status-key == "importing") {
+            return @tr("Importing") + " " + root.status-a1;
+        } else if (status-key == "audio-loaded") {
+            return root.status-a1 + " · " + root.status-a2;
+        }
+        return @tr("Ready");
+    }
+}

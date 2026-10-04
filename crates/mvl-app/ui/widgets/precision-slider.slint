@@ -1,0 +1,190 @@
+// The precision slider (plan §8.3) — a fully custom Slint component.
+//
+//   · center detent tick at `neutral` (lit when the value sits on it)
+//   · filled portion runs from the neutral point toward the current value
+//   · thumb with focus ring and a drag glow
+//   · click / drag to set; arrow keys step by `step` (1 cent / 0.1 dB / 1 mm),
+//     Shift+arrows by `coarse-step`, Home jumps to neutral,
+//     double-click resets
+//   · RTL: the track mirrors (fraction maps 1 − x)
+
+import { Theme } from "../theme.slint";
+import { IconReset } from "../icons.slint";
+import { Translations } from "../translations.slint";
+
+export component PrecisionSlider inherits Rectangle {
+    // ---- contract -------------------------------------------------------
+    in property <float> value;
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> neutral;
+    in property <float> step;          // one arrow-key unit
+    in property <float> coarse-step;   // Shift+arrow unit
+    callback changed(float);           // emits a clamped candidate value
+    callback reset-pressed();
+
+    // ---- derived --------------------------------------------------------
+    out property <float> fraction: (root.value - root.minimum) / (root.maximum - root.minimum);
+    property <bool> rtl: Translations.rtl;
+    property <bool> on-neutral: Math.abs(root.value - root.neutral) < 0.000001;
+
+    // geometry
+    property <length> thumb-size: 16px;
+    property <length> track-thickness: 6px;
+    property <length> edge-inset: root.thumb-size / 2 + 1px;
+    property <length> track-x: root.edge-inset;
+    property <length> track-w: root.width - 2 * root.edge-inset;
+    property <float> neutral-fraction: (root.neutral - root.minimum) / (root.maximum - root.minimum);
+
+    height: 28px;   // comfortable drag target on the 8-pt grid
+
+    // ---- helpers --------------------------------------------------------
+    // screen fraction (0..1, LTR) -> value, honouring RTL mirroring
+    function value-at(pos-fraction: float) -> float {
+        return root.minimum + (root.rtl ? 1 - pos-fraction : pos-fraction) * (root.maximum - root.minimum);
+    }
+    // value -> screen fraction
+    function fraction-at(v: float) -> float {
+        let f = (v - root.minimum) / (root.maximum - root.minimum);
+        return root.rtl ? 1 - f : f;
+    }
+
+    // ---- track ----------------------------------------------------------
+    Rectangle {
+        y: (parent.height - root.track-thickness) / 2;
+        x: root.track-x; width: root.track-w;
+        height: root.track-thickness;
+        border-radius: root.track-thickness / 2;
+        background: Theme.raised;
+    }
+
+    // center detent tick
+    Rectangle {
+        x: root.track-x + root.track-w * root.neutral-fraction - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 2px; height: 16px;
+        border-radius: 1px;
+        background: root.on-neutral ? Theme.accent : Theme.text-muted;
+    }
+
+    // filled portion from neutral toward the value
+    Rectangle {
+        y: (parent.height - root.track-thickness) / 2;
+        height: root.track-thickness;
+        border-radius: root.track-thickness / 2;
+        x: root.track-x + root.track-w * Math.min(root.neutral-fraction, root.fraction);
+        width: Math.max(0px, root.track-w * Math.abs(root.fraction - root.neutral-fraction));
+        background: Theme.accent;
+    }
+
+    // thumb (with drag glow — the only motion, plan §8.1)
+    Rectangle {
+        x: root.track-x + root.track-w * root.fraction - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.thumb-size; height: root.thumb-size;
+        border-radius: self.width / 2;
+        background: Theme.panel;
+        border-width: 2px;
+        border-color: Theme.accent;
+        drop-shadow-blur: ta.pressed ? 10px : 0px;
+        drop-shadow-color: #2DD4BF66;
+    }
+
+    // ---- interaction ----------------------------------------------------
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(ev) => {
+            // In RTL the visual mapping flips, so Left/Right swap meaning.
+            if (ev.text == Key.LeftArrow || ev.text == Key.DownArrow) {
+                root.changed(clamp-value(root.value + (root.rtl ? 1 : -1) * (ev.modifiers.shift ? root.coarse-step : root.step)));
+                return accept;
+            } else if (ev.text == Key.RightArrow || ev.text == Key.UpArrow) {
+                root.changed(clamp-value(root.value + (root.rtl ? -1 : 1) * (ev.modifiers.shift ? root.coarse-step : root.step)));
+                return accept;
+            } else if (ev.text == Key.Home) {
+                root.changed(root.neutral);
+                return accept;
+            } else if (ev.text == Key.End) {
+                root.changed(root.rtl ? root.minimum : root.maximum);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    ta := TouchArea {
+        width: 100%; height: 100%;
+        clicked => {
+            fs.focus();
+            root.changed(clamp-value(root.value-at(self.mouse-x / self.width)));
+        }
+        double-clicked => {
+            root.reset-pressed();
+        }
+        pointer-event(ev) => {
+            if (ev.button == PointerEventButton.left
+                && ev.kind == PointerEventKind.down) {
+                fs.focus();
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.changed(clamp-value(root.value-at(self.mouse-x / self.width)));
+            }
+        }
+        accessible-role: AccessibleRole.slider;
+        accessible-label: "precision slider";
+    }
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        border-width: 2px;
+        border-color: fs.has-focus ? Theme.accent : transparent;
+        opacity: fs.has-focus ? 0.6 : 0.0;
+    }
+
+    function clamp-value(v: float) -> float {
+        return Math.min(root.maximum, Math.max(root.minimum, v));
+    }
+}
+
+// Reset button: circular arrow, small, sits at the right of each module title.
+export component ResetButton inherits Rectangle {
+    callback clicked();
+    in property <string> tooltip;
+
+    width: 24px; height: 24px;
+
+    IconReset {
+        width: 14px; height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        background: ta.has-hover ? Theme.raised : transparent;
+    }
+
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(ev) => {
+            if (ev.text == Key.Return || ev.text == Key.Space) { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        width: 100%; height: 100%;
+        clicked => { fs.focus(); root.clicked(); }
+        accessible-role: AccessibleRole.button;
+        accessible-label: root.tooltip;
+    }
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        border-width: 2px;
+        border-color: fs.has-focus ? Theme.accent : transparent;
+    }
+}

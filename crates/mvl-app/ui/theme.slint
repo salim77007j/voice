@@ -1,0 +1,56 @@
+// Design tokens for "Precision Studio Dark" (docs/ARCHITECTURE_PLAN.md §8.1, §8.8).
+//
+// Color is reserved strictly for meaning:
+//   red = recording · green = transport playing · amber = warning
+//   teal = focus / selection / primary action / waveform
+//
+// Spacing follows the 8-pt grid; control radius 6px, panel radius 10px.
+
+export global Theme {
+    // Surfaces (dark-neutral charcoal, never pure black)
+    out property <color> bg-base:   #141519;
+    out property <color> panel:     #1C1E24;
+    out property <color> raised:    #23262E;
+    out property <color> border:    #2E323C;
+
+    // Text (WCAG AA on bg-base / panel)
+    out property <color> text:      #E7E9EE;
+    out property <color> text-2nd:  #9BA1AC;
+    out property <color> text-muted:#6B7280;
+
+    // Accent & semantics
+    out property <color> accent:     #2DD4BF;
+    out property <color> accent-dim: #1FA396;
+    out property <color> accent-soft:#2DD4BF2E;   // ≈18 % selection fill
+    out property <color> record:     #F0524F;
+    out property <color> play:       #3FDE8B;
+    out property <color> warn:       #F5B93E;
+
+    // Waveform
+    out property <color> wave-peak: #2DD4BF;
+    out property <color> wave-rms:  #2DD4BF8C;    // ≈55 % body
+
+    // Typography (embedded OFL fonts, registered via `import` in app-window.slint)
+    out property <string> font-ui:     "IBM Plex Sans";
+    out property <string> font-mono:   "IBM Plex Mono";
+    out property <string> font-arabic: "IBM Plex Sans Arabic";
+
+    // Geometry — 8-pt grid
+    out property <length> radius-control: 6px;
+    out property <length> radius-panel:   10px;
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 24px;
+
+    // Control metrics
+    out property <length> button-height: 32px;
+    out property <length> toolbar-height: 48px;
+    out property <length> statusbar-height: 28px;
+    out property <length> transport-height: 48px;
+    out property <length> side-panel-width: 300px;
+
+    // Motion (functional only)
+    out property <duration> hover-fade: 120ms;
+}

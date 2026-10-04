@@ -1,12 +1,16 @@
 [package]
 name = "mvl-app"
-description = "Micro-Vocal Lab application (Slint UI lands in Phase 4)"
+description = "Micro-Vocal Lab application (Slint UI)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+name = "mvl_app"
+path = "src/lib.rs"
 
 [[bin]]
 name = "micro-vocal-lab"
@@ -15,3 +19,27 @@ path = "src/main.rs"
 [dependencies]
 mvl-core = { path = "../mvl-core" }
 mvl-io = { path = "../mvl-io" }
+cpal = { workspace = true }
+crossbeam-channel = { workspace = true }
+rtrb = { workspace = true }
+# Slint 1.18 (GPL-3.0 OR commercial OR royalty-free license): winit backend
+# with the femtovg (GPU) renderer for desktop use, plus the pure-Rust software
+# renderer used by the headless screenshot/test path. GPL-3.0 is compatible
+# with our license (docs/ARCHITECTURE_PLAN.md §13).
+slint = { version = "1.18.1", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "accessibility",
+    "compat-1-2",
+] }
+# PNG encoding for headless screenshot verification only.
+png = "0.18"
+# Native file dialogs. On Linux the xdg-desktop-portal backend (no GTK/Wayland
+# link-time dependencies); sync API is used from the UI thread.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+hound = "3.5"
+
+[build-dependencies]
+slint-build = "1.18.1"

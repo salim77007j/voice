@@ -1,0 +1,146 @@
+// Shared button chrome: focusable, keyboard-operable, tooltip-ready,
+// 120 ms hover transitions. Variants: default / primary (teal) / danger (red).
+
+import { Theme } from "../theme.slint";
+import { Translations } from "../translations.slint";
+
+export component IconButtonBase {
+    // -- contract --
+    callback clicked();
+    in property <bool> enabled: true;
+    in property <length> size: 36px;
+    in property <string> tooltip: "";
+    in property <color> accent: Theme.accent;
+
+    // -- chrome --
+    property <color> idle-bg: Theme.raised;
+    property <color> hover-bg: #2E323C;
+    property <color> idle-border: Theme.border;
+
+    width: root.size;
+    height: root.size;
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        background: !root.enabled ? Theme.panel : (ta.has-hover || ta.pressed ? root.hover-bg : root.idle-bg);
+        border-width: 1px;
+        border-color: root.idle-border;
+        opacity: root.enabled ? 1.0 : 0.45;
+    }
+
+    // icon content (children of the IconButtonBase land here)
+    @children
+
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(ev) => {
+            if (ev.text == Key.Return || ev.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        key-released(ev) => {
+            if (ev.text == Key.Space) { return accept; }
+            return reject;
+        }
+    }
+
+    ta := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => { fs.focus(); root.clicked(); }
+        accessible-role: AccessibleRole.button;
+        accessible-label: root.tooltip;
+    }
+
+    // 2px focus ring with soft halo (plan §8.5)
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        border-width: 2px;
+        border-color: fs.has-focus ? root.accent : transparent;
+        opacity: fs.has-focus ? 1.0 : 0.0;
+    }
+}
+
+// Text button used in the toolbar and status bar.
+export component TextButton inherits Rectangle {
+    callback clicked();
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;    // teal filled (Export)
+    in property <bool> danger: false;     // red (recording)
+    in property <bool> active: false;     // pressed/engaged look
+    in property <string> tooltip: "";
+    in property <TextHorizontalAlignment> text-align: TextHorizontalAlignment.center;
+    in property <length> min-w: 72px;
+    in property <bool> mono: false;
+
+    height: Theme.button-height;
+    min-width: root.min-w;
+    horizontal-stretch: 0;
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        background: !root.enabled ? Theme.panel
+            : root.primary ? (ta.has-hover || ta.pressed ? Theme.accent : #26A69A)
+            : root.danger ? (ta.has-hover || ta.pressed ? #E56663 : Theme.record)
+            : root.active ? #2E323C
+            : (ta.has-hover || ta.pressed ? #2E323C : Theme.raised);
+        border-width: 1px;
+        border-color: !root.enabled ? Theme.panel
+            : root.primary ? transparent
+            : root.danger ? transparent
+            : Theme.border;
+        opacity: root.enabled ? 1.0 : 0.45;
+    }
+
+    txt := Text {
+        text: root.text;
+        color: !root.enabled ? Theme.text-muted
+            : root.primary || root.danger ? #FFFFFF
+            : root.active ? Theme.accent
+            : Theme.text;
+        font-family: root.mono ? Theme.font-mono : (Translations.font-family);
+        font-size: 13px;
+        font-weight: 500;
+        vertical-alignment: TextVerticalAlignment.center;
+        horizontal-alignment: root.text-align;
+        width: 100%; height: 100%;
+        overflow: elide;
+    }
+
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(ev) => {
+            if (ev.text == Key.Return || ev.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        key-released(ev) => {
+            if (ev.text == Key.Space) { return accept; }
+            return reject;
+        }
+    }
+
+    ta := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => { fs.focus(); root.clicked(); }
+        accessible-role: AccessibleRole.button;
+        accessible-label: root.tooltip;
+    }
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.radius-control;
+        border-width: 2px;
+        border-color: fs.has-focus ? Theme.accent : transparent;
+        opacity: fs.has-focus ? 1.0 : 0.0;
+    }
+}

@@ -1,0 +1,12 @@
+// Locale state shared by every widget: the controller writes `locale`,
+// widgets read the resolved font family and RTL flag. Slint has no global
+// layout-direction property; mirroring is done with FlexboxLayout
+// `flex-direction: RowReverse` (verified against the 1.18.1 compiler).
+
+import { Theme } from "theme.slint";
+
+export global Translations {
+    in-out property <string> locale: "en";
+    out property <bool> rtl: locale == "ar";
+    out property <string> font-family: rtl ? Theme.font-arabic : Theme.font-ui;
+}

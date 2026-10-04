@@ -34,3 +34,14 @@ pitch-detection = "0.3"
 lto = "thin"
 strip = true
 opt-level = 3
+
+# Lean development/test builds: line tables keep useful backtraces without
+# the multi-GB of full debuginfo the Slint dependency tree would produce
+# (the container's disk budget is tight).
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false

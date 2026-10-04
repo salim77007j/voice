@@ -1,0 +1,114 @@
+# Arabic (ar) catalog for Micro-Vocal Lab.
+# Domain: mvl-app (cargo package name). English source strings live in the
+# .slint files; this catalog is compiled in at build time and selected at
+# runtime with slint::translations::select_bundled_translation("ar").
+# Units follow the plan (§8.6): metrology units and digits stay Western
+# (dB stays dB; "mm" reads better localized as مم in running text).
+msgid ""
+msgstr ""
+"Language: ar\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+# --- toolbar ---
+msgid "New Recording"
+msgstr "تسجيل جديد"
+
+msgid "Stop Recording"
+msgstr "إيقاف التسجيل"
+
+msgid "Import File"
+msgstr "استيراد ملف"
+
+msgid "Export"
+msgstr "تصدير"
+
+msgid "Export the processed audio"
+msgstr "تصدير الصوت المعالَج"
+
+# --- transport ---
+msgid "Play"
+msgstr "تشغيل"
+
+msgid "Pause"
+msgstr "إيقاف مؤقت"
+
+msgid "Stop"
+msgstr "إيقاف"
+
+msgid "Rewind to start"
+msgstr "العودة إلى البداية"
+
+msgid "Zoom in"
+msgstr "تكبير"
+
+msgid "Zoom out"
+msgstr "تصغير"
+
+msgid "Fit whole file"
+msgstr "عرض الملف كاملًا"
+
+# --- modules ---
+msgid "Pitch"
+msgstr "الطبقة"
+
+msgid "st"
+msgstr "نصف نغمة"
+
+msgid "Air & Breath"
+msgstr "الهواء والنَّفَس"
+
+msgid "dB"
+msgstr "dB"
+
+msgid "Formant"
+msgstr "الفورمانت"
+
+msgid "mm"
+msgstr "مم"
+
+msgid "Reset"
+msgstr "إعادة تعيين"
+
+msgid "precision slider"
+msgstr "مقبض دقيق"
+
+# --- waveform ---
+msgid "sample level"
+msgstr "مستوى العيّنة"
+
+msgid "time"
+msgstr "الوقت"
+
+msgid "No audio loaded — import a file or record"
+msgstr "لا يوجد صوت محمَّل — استورد ملفًا أو سجّل"
+
+# --- status bar ---
+msgid "Ready"
+msgstr "جاهز"
+
+msgid "Recording"
+msgstr "جارٍ التسجيل"
+
+msgid "Importing"
+msgstr "جارٍ الاستيراد"
+
+msgid "Rendering"
+msgstr "جارٍ المعالجة"
+
+msgid "Exported"
+msgstr "تم التصدير"
+
+msgid "realtime"
+msgstr "زمن حقيقي"
+
+msgid "Import failed"
+msgstr "فشل الاستيراد"
+
+msgid "Export failed"
+msgstr "فشل التصدير"
+
+msgid "No audio input device found"
+msgstr "لم يُعثر على جهاز إدخال صوتي"
+
+msgid "No audio output device found"
+msgstr "لم يُعثر على جهاز إخراج صوتي"

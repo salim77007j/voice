@@ -177,6 +177,14 @@ impl VocalEngine {
         self.guard_engaged
     }
 
+    /// Deepest air/breath gain applied so far (dB, ≤ 0). This is the
+    /// honest live meter value for the UI (`RenderResult::applied_air_db`
+    /// is the same quantity after a full offline render).
+    #[must_use]
+    pub fn applied_air_db(&self) -> f32 {
+        self.applied_air_db as f32
+    }
+
     /// Process one block. Returns every output sample currently
     /// available (may be fewer than the input while the pipeline fills,
     /// and is the input unchanged while parameters have stayed neutral).
