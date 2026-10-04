@@ -239,7 +239,7 @@ fn selftest_command(args: &[String]) {
 fn self_check() {
     let params = VocalParams::neutral();
     println!(
-        "Micro-Vocal Lab {} — phase 4 (UI)",
+        "Micro-Vocal Lab {} — studio rack UI",
         env!("CARGO_PKG_VERSION")
     );
     println!(
@@ -258,7 +258,7 @@ fn self_check() {
         mvl_io::mp3::lame_version()
     );
     let slint_version = "1.18.1";
-    println!("ui: slint {slint_version} (fluent-dark, embedded IBM Plex, EN/ar + RTL)");
+    println!("ui: slint {slint_version} (studio-rack theme, embedded IBM Plex, EN/ar + RTL)");
     println!("usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...");
 }
 

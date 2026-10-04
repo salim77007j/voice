@@ -30,6 +30,17 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 | 4 | UI (Slint, EN + RTL) | ✅ done — see [`docs/PHASE_4_REPORT.md`](docs/PHASE_4_REPORT.md) + [`docs/phase4-screenshots/`](docs/phase4-screenshots/) |
 | 5 | CI matrix + on-device verification kit + size pass | ✅ done — see [`docs/PHASE_5_REPORT.md`](docs/PHASE_5_REPORT.md) + [`docs/ONDEVICE.md`](docs/ONDEVICE.md) |
 | 6 | Final validation + v1.0.0 | ✅ done — see [`docs/PHASE_6_REPORT.md`](docs/PHASE_6_REPORT.md) + [`docs/phase6-evidence/`](docs/phase6-evidence/) |
+| 7 | P0 bug fixes + studio-rack UI + cross-platform re-verification (v1.1.0) | ✅ done — see [`docs/PHASE_7_REPORT.md`](docs/PHASE_7_REPORT.md) + [`docs/phase7-evidence/`](docs/phase7-evidence/) |
+
+**v1.1.0** (current) — all four user-reported P0 bugs fixed (device-enumeration
+fallback chains with a device picker, import-crash panic guards, full output-format
+coverage, decode-size caps + 1000-file fuzz), UI redesigned to a professional
+studio-rack instrument (live 40-band RTA, LED level metering with clip latch,
+skeuomorphic knobs) per user-supplied reference; 196 tests, 5-OS CI matrix green
+on both code commits and the tag run; clippy/fmt clean. Details:
+[`docs/PHASE_7_REPORT.md`](docs/PHASE_7_REPORT.md); UI renders in
+[`docs/phase7-evidence/`](docs/phase7-evidence/). Prebuilt binaries are attached as
+artifacts of the v1.1.0 tag CI run.
 
 **v1.0.0** — CI green on all 5 OS legs (tag run: 10/10 jobs); 160 tests; 22.7× realtime render; preview 10.7 ms;
 cold start 36 ms; RAM ≤ 22.4 MiB; binary 21.64 MiB. Evidence pack in
@@ -50,13 +61,16 @@ rustfft/realfft (STFT, Phase 3). Full decision record with rejected alternatives
 cargo run --release -p mvl-app            # desktop UI (optionally: run FILE.wav)
 ```
 
-A professional dark studio UI ("Precision Studio Dark", IBM Plex, teal accent):
-toolbar with 192 kHz recording and import/export, transport with sub-millisecond
-waveform zoom down to individual samples, the three precision modules bound
-**live** to the same engine the export uses, status telemetry (applied air gain,
-preview latency), and instant English ⇄ العربية switching with full RTL
-mirroring. Real renders of the UI (not mockups) are committed in
-[`docs/phase4-screenshots/`](docs/phase4-screenshots/).
+A professional studio-rack UI ("Audioprecise Pro" design language: gunmetal
+rack panels with recessed wells, gold accents, engraved nameplate):
+waveform display with sample-level zoom, the three precision modules as channel
+strips with skeuomorphic knobs and LED telemetry, a live analysis rack
+(40-band RTA spectrum + LED level metering with peak hold and clip latch),
+a device picker for multi-interface setups (v1.1.0), status telemetry (applied
+air gain, preview latency), and instant English ⇄ العربية switching with full
+RTL mirroring. Real renders of the UI (not mockups) are committed in
+[`docs/phase7-evidence/`](docs/phase7-evidence/) (v1.1.0 rack design) and
+[`docs/phase4-screenshots/`](docs/phase4-screenshots/) (v1.0.0).
 
 On headless machines the same UI can be rendered to PNG for verification:
 
@@ -94,7 +108,7 @@ GPL-3.0 — see [`LICENSE`](LICENSE). Fonts: IBM Plex family (OFL-1.1).
 
 ```sh
 cargo build --workspace                 # Linux needs libasound2-dev (ALSA headers)
-cargo test --workspace                  # 160 tests, headless, runs everywhere
+cargo test --workspace                  # 196 tests, headless, runs everywhere
 cargo test --workspace -- --ignored     # hardware smoke tests — real devices only
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -104,6 +118,6 @@ CI (`.github/workflows/ci.yml`) runs fmt + clippy, the full test suite on
 **ubuntu-22.04 / ubuntu-24.04 / windows / macos (arm64 + x86_64)** — the Linux
 legs additionally exercise the audio stack against a virtual ALSA null device
 (`MVL_VIRTUAL_AUDIO=1`, path coverage without timing claims) — then builds
-per-OS release artifacts (21.4 MB on Linux, fat LTO). Artifacts are attached
+per-OS release artifacts (23.6 MB binary / 10.6 MB tarball on Linux, fat LTO). Artifacts are attached
 to every commit on `main` and to `v*` tags. macOS artifacts are unsigned:
 `xattr -cr micro-vocal-lab` on first run.
