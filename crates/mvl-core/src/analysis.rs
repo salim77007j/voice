@@ -215,7 +215,18 @@ impl FrameAnalyzer {
         let dbfs = (20.0 * (rms + 1e-12).log10()) as f32;
         let (centroid, flatness, hbr) = spectral_features(spectrum, fft_size, self.rate);
         let transient = self.detect_transient();
-        let class = classify(dbfs, clarity as f32, hbr as f32, in_range);
+        let raw = classify(dbfs, clarity as f32, hbr as f32, in_range);
+        // Frames whose analysis window is truncated by the stream start
+        // (left-flush pad) cannot be judged for noise character — a
+        // voiced onset would otherwise read as low-clarity "breath" and
+        // get ducked. Keep a detected pitch (Voiced), else fall back to
+        // Silence (no processing) for the first ~20 ms.
+        let partial_window = frame_end < self.base * self.decim;
+        let class = if partial_window && raw != FrameClass::Voiced {
+            FrameClass::Silence
+        } else {
+            raw
+        };
         FrameFeatures {
             f0_hz: if in_range { f0.map(|v| v as f32) } else { None },
             clarity: clarity as f32,
@@ -564,6 +575,25 @@ mod tests {
             }
         }
         assert!(fired, "no transient flagged around the onset");
+    }
+
+    #[test]
+    fn abrupt_voiced_start_is_not_misclassified_as_breath() {
+        // Regression: left-flush pad frames of an abruptly starting
+        // voiced signal must never classify as Breath/Sibilant.
+        let sig = ts::harmonic_stack(196.0, 16, 0.5, RATE as usize, RATE);
+        let feats = analyze_streaming(&sig);
+        assert!(
+            feats
+                .iter()
+                .all(|f| f.class == FrameClass::Voiced || f.class == FrameClass::Silence),
+            "edge frames misclassified: {:?}",
+            feats.iter().map(|f| f.class).collect::<Vec<_>>()
+        );
+        // And from the moment the window is fully inside the signal,
+        // everything is voiced.
+        let settled = &feats[16..];
+        assert!(settled.iter().all(|f| f.class == FrameClass::Voiced));
     }
 
     #[test]

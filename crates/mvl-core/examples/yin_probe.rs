@@ -33,6 +33,12 @@ fn main() {
     let rate = 48_000usize;
     let len = 48_000;
     probe(
+        "stack196x16",
+        &ts::harmonic_stack(196.0, 16, 0.5, len, rate as u32),
+        rate,
+        1024,
+    );
+    probe(
         "sine220",
         &ts::sine(220.0, 0.5, len, rate as u32),
         rate,

@@ -11,6 +11,7 @@
 //! VocalEngine (landing later in Phase 3).
 
 pub mod analysis;
+pub mod breath;
 pub mod error;
 pub mod formant;
 pub mod params;
@@ -19,6 +20,7 @@ pub mod stft;
 pub mod testsupport;
 
 pub use analysis::{ClassSmoother, FrameAnalyzer, FrameClass, FrameFeatures};
+pub use breath::{BreathEdit, BreathProcessor};
 pub use error::EngineError;
 pub use formant::FormantProcessor;
 pub use params::{QualityProfile, VocalParams};

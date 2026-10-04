@@ -303,3 +303,28 @@ pub fn band_peak_freq(x: &[f32], rate: u32, lo: f64, hi: f64) -> Option<f64> {
     }
     best.map(|(_, k)| k as f64 * bin_hz)
 }
+
+/// Total energy in `[lo, hi]` Hz, in dB (10·log10 of FFT band power,
+/// normalised by transform length — consistent for before/after
+/// comparisons).
+#[must_use]
+pub fn band_power_db(x: &[f32], rate: u32, lo: f64, hi: f64) -> f64 {
+    if x.is_empty() {
+        return -120.0;
+    }
+    let mut planner = RealFftPlanner::new();
+    let r2c = planner.plan_fft_forward(x.len());
+    let mut input: Vec<f64> = x.iter().map(|v| f64::from(*v)).collect();
+    let mut spec = r2c.make_output_vec();
+    r2c.process(&mut input, &mut spec)
+        .expect("lengths pre-allocated");
+    let bin_hz = f64::from(rate) / x.len() as f64;
+    let k_lo = ((lo / bin_hz).ceil() as usize).max(1);
+    let k_hi = ((hi / bin_hz).floor() as usize).min(spec.len().saturating_sub(1));
+    let mut sum = 0.0f64;
+    for b in &spec[k_lo..=k_hi] {
+        sum += b.norm_sqr();
+    }
+    let n = x.len() as f64;
+    10.0 * (sum / (n * n) + 1e-30).log10()
+}
