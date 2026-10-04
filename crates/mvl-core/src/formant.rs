@@ -121,8 +121,8 @@ impl FormantProcessor {
         self.r2c
             .process(&mut input, &mut spec)
             .expect("pre-sized buffers");
-        for q in (q_cutoff + 1)..spec.len() {
-            spec[q] = Complex64::new(0.0, 0.0);
+        for b in spec.iter_mut().skip(q_cutoff + 1) {
+            *b = Complex64::new(0.0, 0.0);
         }
         let mut out = vec![0.0f64; s.len()];
         self.c2r
