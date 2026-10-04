@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mvl-core", "crates/mvl-io", "crates/mvl-app"]
+members = ["crates/mvl-core", "crates/mvl-io", "crates/mvl-app", "scripts"]
 
 [workspace.package]
 version = "0.1.0"

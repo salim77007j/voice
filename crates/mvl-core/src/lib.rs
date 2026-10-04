@@ -10,8 +10,11 @@
 //! (true-envelope warp) and air/breath engine, assembled by the
 //! VocalEngine (landing later in Phase 3).
 
+pub mod analysis;
 pub mod params;
 pub mod stft;
+pub mod testsupport;
 
+pub use analysis::{ClassSmoother, FrameAnalyzer, FrameClass, FrameFeatures};
 pub use params::{QualityProfile, VocalParams};
 pub use stft::{AnalysisFrame, OverlapAdder, StftAnalyzer};
