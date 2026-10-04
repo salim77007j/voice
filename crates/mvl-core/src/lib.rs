@@ -11,10 +11,14 @@
 //! VocalEngine (landing later in Phase 3).
 
 pub mod analysis;
+pub mod error;
 pub mod params;
+pub mod pitch;
 pub mod stft;
 pub mod testsupport;
 
 pub use analysis::{ClassSmoother, FrameAnalyzer, FrameClass, FrameFeatures};
+pub use error::EngineError;
 pub use params::{QualityProfile, VocalParams};
+pub use pitch::{PhaseVocoder, PitchPath, RatioConverter};
 pub use stft::{AnalysisFrame, OverlapAdder, StftAnalyzer};
