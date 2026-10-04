@@ -158,6 +158,8 @@ Tag `v1.0.0` is an annotated tag on `47e6e21` — the matrix-migration commit on
 
 Each archive contains the binary, `LICENSE` (GPL-3.0) and `README.md`. Verification recipe for any user: download, extract, `micro-vocal-lab self-check` (36 ms, prints the module report), then `run` or `selftest` per `docs/ONDEVICE.md`.
 
+*Tree note:* the tag pins the validated code and is the artifact source; this report's filled-in numbers and the machine snapshot `ci-run.txt` live on the commit immediately after the tag (`8632d1e`, docs-only delta, CI-verified green on the same tree).
+
 ---
 
 ## 8. Conclusion
