@@ -14,13 +14,17 @@
 
 mod error;
 pub mod mp3;
+pub mod player;
 pub mod recorder;
 pub mod resample;
+pub mod transport;
 pub mod wav;
 
 pub use error::{Error, Result};
 pub use mp3::{Mp3Bitrate, Mp3Settings, VbrQuality};
+pub use player::{Player, PlayerCommand};
 pub use recorder::{RecordRequest, RecordingStats, SampleFmt};
+pub use transport::{Transport, TransportState};
 pub use wav::WavDepth;
 
 /// Interleaved `f32` audio with its sample rate and channel count.
