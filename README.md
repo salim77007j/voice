@@ -29,7 +29,12 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 | 3 | DSP engine (pitch / air / formant) | ✅ done — see [`docs/PHASE_3_REPORT.md`](docs/PHASE_3_REPORT.md) |
 | 4 | UI (Slint, EN + RTL) | ✅ done — see [`docs/PHASE_4_REPORT.md`](docs/PHASE_4_REPORT.md) + [`docs/phase4-screenshots/`](docs/phase4-screenshots/) |
 | 5 | CI matrix + on-device verification kit + size pass | ✅ done — see [`docs/PHASE_5_REPORT.md`](docs/PHASE_5_REPORT.md) + [`docs/ONDEVICE.md`](docs/ONDEVICE.md) |
-| 6 | Final validation + v1.0.0 | ⏳ next |
+| 6 | Final validation + v1.0.0 | ✅ done — see [`docs/PHASE_6_REPORT.md`](docs/PHASE_6_REPORT.md) + [`docs/phase6-evidence/`](docs/phase6-evidence/) |
+
+**v1.0.0** — CI green on all 5 OS legs; 160 tests; 22.7× realtime render; preview 10.7 ms;
+cold start 36 ms; RAM ≤ 22.4 MiB; binary 21.64 MiB. Evidence pack in
+[`docs/phase6-evidence/`](docs/phase6-evidence/). On-device checklist (real mic/speakers):
+[`docs/ONDEVICE.md`](docs/ONDEVICE.md).
 
 ## Technology
 

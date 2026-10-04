@@ -1,0 +1,49 @@
+Micro-Vocal Lab — Phase 6 performance evidence (container, x86_64, 2 cores)
+date: 2026-10-04T13:35:37Z   binary: 22687312 bytes
+kernel: 5.10.134-013.15.kangaroo.al8.x86_64   rust: rustc 1.99.0 (b940084d7 2026-09-28)
+
+=== 1. cold start (self-check: process spawn → engine boot → smoke render → exit) ===
+[self-check run 1] wall=37 ms  peak_rss=8.4 MiB  exit=0
+[self-check run 1] stdout tail: codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME 3.100)
+ui: slint 1.18.1 (fluent-dark, embedded IBM Plex, EN/ar + RTL)
+usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...
+
+[self-check run 2] wall=36 ms  peak_rss=8.3 MiB  exit=0
+[self-check run 2] stdout tail: codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME 3.100)
+ui: slint 1.18.1 (fluent-dark, embedded IBM Plex, EN/ar + RTL)
+usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...
+
+[self-check run 3] wall=36 ms  peak_rss=8.4 MiB  exit=0
+[self-check run 3] stdout tail: codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME 3.100)
+ui: slint 1.18.1 (fluent-dark, embedded IBM Plex, EN/ar + RTL)
+usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...
+
+[self-check run 4] wall=36 ms  peak_rss=8.6 MiB  exit=0
+[self-check run 4] stdout tail: codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME 3.100)
+ui: slint 1.18.1 (fluent-dark, embedded IBM Plex, EN/ar + RTL)
+usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...
+
+[self-check run 5] wall=36 ms  peak_rss=8.4 MiB  exit=0
+[self-check run 5] stdout tail: codecs: WAV (hound) + MP3 decode (symphonia 0.5) + MP3 encode (LAME 3.100)
+ui: slint 1.18.1 (fluent-dark, embedded IBM Plex, EN/ar + RTL)
+usage: micro-vocal-lab [run|process|screenshot|selftest|self-check] ...
+
+=== 2. headless UI instantiation + render (screenshot, EN 1600x900) ===
+[screenshot EN] wall=57 ms  peak_rss=22.1 MiB  exit=0
+[screenshot EN] stdout tail: wrote docs/phase6-evidence/ui-en.png (1280x800)
+
+[screenshot AR/RTL] wall=57 ms  peak_rss=22.4 MiB  exit=0
+[screenshot AR/RTL] stdout tail: wrote docs/phase6-evidence/ui-ar.png (1280x800)
+
+=== 3. offline render (process, render profile, all three modules active) ===
+[process render profile] wall=93 ms  peak_rss=10.2 MiB  exit=0
+[process render profile] stdout tail: processing samples/pitch_plus_7st.wav (2.00 s, 1 ch, 48000 Hz) with pitch +5.00 st, air -40%, tract 130 mm [Render]
+done: docs/phase6-evidence/render.wav (rendered 2.00 s of audio in 0.09 s = 22.7x realtime)
+
+[process preview profile] wall=103 ms  peak_rss=9.2 MiB  exit=0
+[process preview profile] stdout tail: processing samples/neutral_bypass.wav (1.50 s, 1 ch, 48000 Hz) with pitch -5.00 st, air 70%, tract 230 mm [Preview]
+done: docs/phase6-evidence/render-preview.wav (rendered 1.50 s of audio in 0.09 s = 16.0x realtime)
+
+=== 4. full test suite wall time (for the record) ===
+total passed: 160 in 65 s
+(suite wall time = fmt-free single run)

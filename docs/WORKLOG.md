@@ -85,3 +85,21 @@ Append-only log. One entry per sub-item, per the phased execution protocol.
 **5.4 Docs** (this commit) — PHASE_5_REPORT.md, README (CI badge, Phase 5 status, selftest tour, Development section), this entry.
 
 **Phase 5 exit state (in-container):** 160 tests passed / 0 failed / 5 ignored (2 hw + 2 fixture regen + 1 hw preview), fmt + clippy `-D warnings` clean, release 21.4 MB, actionlint clean, Linux CI leg proven locally with the virtual-audio env. Honest gaps: windows/macos CI legs unexecuted until push; on-device run pending a real machine; 21.4 MB above the §9 aspiration but 57 % under budget. Waiting for: push credential (or user push), then "continue" for Phase 6 (validation report + evidence pack + v1.0.0).
+
+---
+
+## 2026-10-04 — Phase 6: full validation + evidence pack + v1.0.0
+
+**Session start** — user supplied the push token with "continue"; Phase 5's four local commits (`b2a66e5`…`dbf0251`) pushed (`bc5e25c..dbf0251`), triggering the repository's first-ever CI run.
+
+**6.0 CI first-run incident + hotfix** (commit `879ca7d`) — run #1 (`dbf0251`) failed both ubuntu-24.04 legs: `yeslogic-fontconfig-sys` 6.0.1 (via `fontique`, Slint 1.18's font enumeration) panicked in build.rs — the 24.04 runner image ships no fontconfig dev files, while the dev container and the 22.04 image do (which is why every local "CI-leg proven" run passed; honest lesson recorded). Dependency audit via `cargo tree -i` on x86_64-unknown-linux-gnu: hard-linked system libs are exactly ALSA + fontconfig (wayland/glutin_glx are dlopen; libudev/input/libseat-sys not in the tree). All three Linux apt steps now install `libasound2-dev libfontconfig1-dev`; actionlint 1.7.7 clean. Run #2 (`879ca7d`): **all 5 test legs + lint green**, release artifacts built.
+
+**6.1 Local full validation** — reproduced on the exact hotfix commit: `fmt --check` PASS, `clippy -D warnings` PASS, `MVL_VIRTUAL_AUDIO=1 cargo test --workspace` **160/0/5 in 65 s**, release build 21.64 MiB (P5 recorded 21.41 — fat-LTO link nondeterminism ~1 %, both numbers reported), `self-check` + EN/AR headless screenshots + two-profile offline renders all PASS.
+
+**6.2 Performance evidence** (`docs/phase6-evidence/perf.txt`) — cold start **36 ms** (median of 5, spawn→boot→smoke-render→exit), peak RSS **8.4 MiB** boot / **22.1/22.4 MiB** full UI EN/AR / **10.2 MiB** render; offline render **22.7× realtime** (Render profile, three modules active) and **16.0×** (Preview profile); preview algorithmic latency 10.7 ms @ 48 kHz (test-asserted, unchanged). Every §9 budget met with 9–28× margin. Methodology (no `/usr/bin/time` in container): monotonic wall clock + `/proc/<pid>/status` VmHWM polling, script kept outside the repo.
+
+**6.3 Evidence pack + reports** (this commit) — `docs/phase6-evidence/`: `perf.txt`, `ci-run.txt` (machine-captured API snapshot of run #2: per-job results, durations, artifact sizes), fresh EN + AR/RTL UI PNGs, two-profile render WAVs. `docs/PHASE_6_REPORT.md`: verdict table, validation matrix, budget-vs-measured table, test-quality narrative (48→160 across phases, invariant spine), the CI incident record, final honest gaps (on-device run still pending a human; 21.6 MB vs 10–18 aspiration; 1e-4 cross-platform tolerance policy; long high-rate imports RAM-resident; unsigned macOS; standing decisions). README: Phase 6 ✅ + v1.0.0 numbers.
+
+**6.4 Release** — annotated tag `v1.0.0` on `879ca7d` (the exact CI-validated code commit; this documentation commit lands on `main` right after the tag); the tag push re-runs the full pipeline on the same tree and attaches the four platform artifacts.
+
+**Phase 6 exit state:** protocol complete. 160 tests / fmt / clippy green locally and on all 5 CI legs; 4 release artifacts; every budget met; gaps honestly enumerated. v1.0.0.
