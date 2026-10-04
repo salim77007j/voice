@@ -1,5 +1,7 @@
 # Micro-Vocal Lab
 
+[![CI](https://github.com/salim77007j/voice/actions/workflows/ci.yml/badge.svg)](https://github.com/salim77007j/voice/actions/workflows/ci.yml)
+
 **Precision voice surgery, free and open.** A standalone, Rust-native desktop application
 (Windows · macOS · Linux) for microscopic control over the recorded human voice.
 
@@ -26,8 +28,8 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 | 2 | Scaffold + audio I/O (record, import, export, playback) | ✅ done — see [`docs/PHASE_2_REPORT.md`](docs/PHASE_2_REPORT.md) |
 | 3 | DSP engine (pitch / air / formant) | ✅ done — see [`docs/PHASE_3_REPORT.md`](docs/PHASE_3_REPORT.md) |
 | 4 | UI (Slint, EN + RTL) | ✅ done — see [`docs/PHASE_4_REPORT.md`](docs/PHASE_4_REPORT.md) + [`docs/phase4-screenshots/`](docs/phase4-screenshots/) |
-| 5 | CI + integration + testing | ⏳ next |
-| 6 | Final validation + v1.0.0 | planned |
+| 5 | CI matrix + on-device verification kit + size pass | ✅ done — see [`docs/PHASE_5_REPORT.md`](docs/PHASE_5_REPORT.md) + [`docs/ONDEVICE.md`](docs/ONDEVICE.md) |
+| 6 | Final validation + v1.0.0 | ⏳ next |
 
 ## Technology
 
@@ -56,6 +58,13 @@ On headless machines the same UI can be rendered to PNG for verification:
 micro-vocal-lab screenshot out.png take.wav --pitch 3 --air -30 --tract 140 --locale ar
 ```
 
+And on a real desktop, one command verifies the whole hardware chain and
+collects the evidence (see [`docs/ONDEVICE.md`](docs/ONDEVICE.md)):
+
+```sh
+micro-vocal-lab selftest --seconds 10
+```
+
 ## The engine from the command line
 
 The binary also exposes the full DSP headlessly:
@@ -74,3 +83,21 @@ sources in [`testdata/`](testdata/).
 ## License
 
 GPL-3.0 — see [`LICENSE`](LICENSE). Fonts: IBM Plex family (OFL-1.1).
+
+## Development
+
+```sh
+cargo build --workspace                 # Linux needs libasound2-dev (ALSA headers)
+cargo test --workspace                  # 160 tests, headless, runs everywhere
+cargo test --workspace -- --ignored     # hardware smoke tests — real devices only
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+CI (`.github/workflows/ci.yml`) runs fmt + clippy, the full test suite on
+**ubuntu-22.04 / ubuntu-24.04 / windows / macos (arm64 + x86_64)** — the Linux
+legs additionally exercise the audio stack against a virtual ALSA null device
+(`MVL_VIRTUAL_AUDIO=1`, path coverage without timing claims) — then builds
+per-OS release artifacts (21.4 MB on Linux, fat LTO). Artifacts are attached
+to every commit on `main` and to `v*` tags. macOS artifacts are unsigned:
+`xattr -cr micro-vocal-lab` on first run.
