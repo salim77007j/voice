@@ -63,35 +63,66 @@ pub struct FormantProcessor {
     nyquist: f64,
     r2c: Arc<dyn RealToComplex<f64>>,
     c2r: Arc<dyn ComplexToReal<f64>>,
-    /// Bark coordinates of the control points (ascending).
-    bark_coords: Vec<f64>,
-    /// Frequencies of the control points (Hz, ascending).
+    /// Frequencies of the Bark-spaced control points (Hz, ascending) —
+    /// kept for the UI's envelope view and diagnostics.
     control_freqs: Vec<f64>,
+    /// Per-bin one-pole smoothing of the ratio field across frames.
+    /// Essential: any per-frame estimate wobble amplitude-modulates the
+    /// harmonics at the frame rate and creates audible AM sidebands at
+    /// |f0 − frame_rate| (found by the engine invariant tests).
+    prev_ratio_db: Vec<f64>,
+    smoothing_init: bool,
+    smoothing_coef: f64,
+    /// Per-bin Bark smoothing width (in bins, ~0.375 Bark) — the
+    /// anti-birdie guarantee: the field can never ripple between
+    /// adjacent bins.
+    smooth_width_bins: Vec<usize>,
+    /// Cepstral transform length (next pow2 ≥ bins).
+    cep_len: usize,
 }
 
 impl FormantProcessor {
-    /// Create for an STFT of `fft_size` points at `rate`.
+    /// Create for an STFT of `fft_size` points at `rate` with the given
+    /// hop (controls the cross-frame ratio smoothing time constant).
     #[must_use]
-    pub fn new(planner: &mut RealFftPlanner<f64>, fft_size: usize, rate: u32) -> Self {
+    pub fn new(planner: &mut RealFftPlanner<f64>, fft_size: usize, rate: u32, hop: usize) -> Self {
         let bins = fft_size / 2 + 1;
         let nyquist = f64::from(rate) / 2.0;
         let b_hi = bark(nyquist);
-        let bark_coords: Vec<f64> = (0..BARK_POINTS)
+        let control_freqs: Vec<f64> = (0..BARK_POINTS)
             .map(|j| b_hi * j as f64 / (BARK_POINTS - 1) as f64)
+            .map(|b| bark_inverse(b, nyquist * 1.5))
             .collect();
-        let control_freqs: Vec<f64> = bark_coords
-            .iter()
-            .map(|&b| bark_inverse(b, nyquist * 1.5))
-            .collect();
+        let hop_sec = hop as f64 / f64::from(rate);
+        let cep_len = bins.next_power_of_two();
         Self {
             bins,
             rate,
             nyquist,
-            r2c: planner.plan_fft_forward(bins),
-            c2r: planner.plan_fft_inverse(bins),
-            bark_coords,
+            r2c: planner.plan_fft_forward(cep_len),
+            c2r: planner.plan_fft_inverse(cep_len),
             control_freqs,
+            prev_ratio_db: vec![0.0; bins],
+            smoothing_init: false,
+            smoothing_coef: 1.0 - (-hop_sec / 0.012).exp(),
+            smooth_width_bins: Self::bark_width_table(bins, rate),
+            cep_len,
         }
+    }
+
+    /// Per-bin smoothing width in bins for ~0.375 Bark of smoothing.
+    fn bark_width_table(bins: usize, rate: u32) -> Vec<usize> {
+        let bin_hz = f64::from(rate) / ((bins - 1) * 2) as f64;
+        let nyq = f64::from(rate) / 2.0;
+        (0..bins)
+            .map(|k| {
+                let f = (k as f64 * bin_hz).max(1.0);
+                let b = bark(f);
+                let f_lo = bark_inverse((b - 0.1875).max(0.0), nyq * 2.0);
+                let f_hi = bark_inverse(b + 0.1875, nyq * 2.0);
+                (((f_hi - f_lo) / bin_hz).round() as usize).max(1)
+            })
+            .collect()
     }
 
     /// Control-point frequencies in Hz (diagnostics / UI envelope view).
@@ -100,23 +131,32 @@ impl FormantProcessor {
         &self.control_freqs
     }
 
-    /// Quefrency lifter cutoff: keep quefrencies that carry envelope
-    /// structure, drop the harmonic ripple (which peaks at quefrency
-    /// `rate / (2·F0)` in a length-`bins` transform). F0-aware per plan.
-    fn lifter_cutoff(&self, f0: Option<f64>) -> usize {
-        let q = match f0 {
+    /// Quefrency lifter cutoff measured in the *padded* cepstral
+    /// transform's index units: keep quefrencies that carry envelope
+    /// structure, drop the harmonic ripple (which peaks at
+    /// `rate / (2·F0)` in a length-`bins` transform, i.e.
+    /// `rate / (2·F0) · L / bins` in the length-`L` padded transform).
+    /// F0-aware per plan.
+    fn lifter_cutoff_padded(&self, f0: Option<f64>) -> usize {
+        let q_bins = match f0 {
             Some(f) if (crate::analysis::MIN_F0_HZ..=crate::analysis::MAX_F0_HZ).contains(&f) => {
                 0.75 * f64::from(self.rate) / (2.0 * f)
             }
             _ => self.bins as f64 / 16.0,
         };
-        (q as usize).clamp(8, self.bins / 4)
+        let q = q_bins * self.cep_len as f64 / self.bins as f64;
+        (q as usize).clamp(8, self.cep_len / 4)
     }
 
     /// Ceptrally smoothed version of a log-magnitude curve (natural log
-    /// units), low-quefrency liftered at `q_cutoff`.
+    /// units), low-quefrency liftered. The transform runs at the next
+    /// power of two above `bins` (257 is prime — Bluestein would make
+    /// every frame an order of magnitude slower); the zero padding only
+    /// rescales quefrency indices, which [`Self::lifter_cutoff_padded`]
+    /// accounts for.
     fn cepstral_smooth(&self, s: &[f64], q_cutoff: usize) -> Vec<f64> {
-        let mut input = s.to_vec();
+        let mut input = vec![0.0f64; self.cep_len];
+        input[..s.len().min(self.cep_len)].copy_from_slice(&s[..s.len().min(self.cep_len)]);
         let mut spec = self.r2c.make_output_vec();
         self.r2c
             .process(&mut input, &mut spec)
@@ -124,12 +164,12 @@ impl FormantProcessor {
         for b in spec.iter_mut().skip(q_cutoff + 1) {
             *b = Complex64::new(0.0, 0.0);
         }
-        let mut out = vec![0.0f64; s.len()];
+        let mut out = vec![0.0f64; self.cep_len];
         self.c2r
             .process(&mut spec, &mut out)
             .expect("hermitian by construction");
-        let scale = 1.0 / s.len() as f64;
-        out.iter().map(|v| v * scale).collect()
+        let scale = 1.0 / self.cep_len as f64;
+        out.iter().map(|v| v * scale).take(s.len()).collect()
     }
 
     /// Iterative true envelope of a magnitude spectrum, in dB.
@@ -140,7 +180,7 @@ impl FormantProcessor {
     pub fn true_envelope_db(&self, mags: &[f64], f0: Option<f64>) -> Vec<f64> {
         assert_eq!(mags.len(), self.bins, "magnitude/bin mismatch");
         let s: Vec<f64> = mags.iter().map(|m| (m + 1e-12).ln()).collect();
-        let q = self.lifter_cutoff(f0);
+        let q = self.lifter_cutoff_padded(f0);
         let mut env = s.clone();
         for _ in 0..ENVELOPE_ITERATIONS {
             let smooth = self.cepstral_smooth(&env, q);
@@ -160,62 +200,174 @@ impl FormantProcessor {
     /// `g == 1` (within [`IDENTITY_EPSILON`]) returns an exact all-ones
     /// field — the stage is a true no-op when neutral.
     #[must_use]
-    pub fn warp_field(&self, spectrum: &[Complex64], g: f64, f0: Option<f64>) -> Vec<f64> {
+    pub fn warp_field(&mut self, spectrum: &[Complex64], g: f64, f0: Option<f64>) -> Vec<f64> {
         assert_eq!(spectrum.len(), self.bins, "spectrum/bin mismatch");
         if (g - 1.0).abs() < IDENTITY_EPSILON {
             return vec![1.0; self.bins];
         }
         let mags: Vec<f64> = spectrum.iter().map(|b| b.norm()).collect();
-        let env_db = self.true_envelope_db(&mags, f0);
+        // Voiced frames: sample the envelope at the harmonics (stable for
+        // stationary content — per-frame cepstral estimates wobble with
+        // the STFT leakage pattern and amplitude-modulate the signal;
+        // found by the engine invariant tests). Unvoiced frames keep the
+        // cepstral true envelope.
+        let voiced_f0 = f0.filter(|f| {
+            (crate::analysis::MIN_F0_HZ..=crate::analysis::MAX_F0_HZ).contains(f)
+                && self.nyquist > 2.2 * *f
+        });
+        let (env_db, harmonic_samples) = match voiced_f0 {
+            Some(f) => self.harmonic_envelope_with_samples(&mags, f),
+            None => (self.true_envelope_db(&mags, f0), Vec::new()),
+        };
         let max_db = env_db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let floor = max_db + ENVELOPE_FLOOR_DB;
+        // Per-bin spectrum level (dB) for the empty-space gate below.
+        let spec_db: Vec<f64> = mags.iter().map(|m| 20.0 * (m + 1e-12).log10()).collect();
+        let spec_max = spec_db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-        // Control-point envelope (floored) of the original.
-        let e_orig: Vec<f64> = self
-            .control_freqs
-            .iter()
-            .map(|&f| self.eval_env_db(&env_db, f).max(floor))
-            .collect();
+        // Ratio field construction. Voiced frames compute the ratio
+        // *at the harmonics* — the only bins with energy — and
+        // log-frequency interpolate to the bin grid: exact warp at the
+        // partials, ripple-free by construction (no smoothing needed,
+        // which matters: Bark averaging across a Q≈10 formant peak
+        // dilutes the ratio by several dB). Unvoiced frames use the
+        // per-bin ratio with variable-width Bark smoothing.
+        let bin_hz = f64::from(self.rate) / ((self.bins - 1) * 2) as f64;
+        let gate_hi = spec_max - 60.0;
+        let gate_lo = spec_max - 80.0;
 
-        // Control-point envelope of the warp: value at f comes from the
-        // original envelope at f/g (with Nyquist fold-back).
-        let e_warp: Vec<f64> = self
-            .control_freqs
-            .iter()
-            .map(|&f| {
-                let src = f / g;
-                if src <= self.nyquist {
-                    self.eval_env_db(&env_db, src).max(floor)
+        let fold_src = |src: f64| -> f64 {
+            // Envelope value at the (possibly folded) source position.
+            if src <= self.nyquist {
+                self.eval_env_db(&env_db, src)
+            } else {
+                let folded = 2.0 * self.nyquist - src;
+                if folded >= 0.0 {
+                    self.eval_env_db(&env_db, folded) + FOLD_ATTENUATION_DB
                 } else {
-                    let folded = 2.0 * self.nyquist - src;
-                    if folded >= 0.0 {
-                        self.eval_env_db(&env_db, folded).max(floor) + FOLD_ATTENUATION_DB
-                    } else {
-                        floor + FOLD_ATTENUATION_DB
-                    }
+                    floor + FOLD_ATTENUATION_DB
                 }
-            })
-            .collect();
+            }
+        };
 
-        // Ratio field on control points, critical-band smoothed.
-        let mut ratio: Vec<f64> = e_warp
-            .iter()
-            .zip(&e_orig)
-            .map(|(&w, &o)| (w - o).clamp(-RATIO_CLAMP_DB, RATIO_CLAMP_DB))
-            .collect();
-        ratio = smooth_circular(&ratio, 2);
+        let mut ratio_db: Vec<f64> = if !harmonic_samples.is_empty() {
+            // --- Voiced: exact per-harmonic ratios -------------------
+            let mut r_h: Vec<(f64, f64)> = Vec::with_capacity(harmonic_samples.len());
+            for &(f_h, e_h) in &harmonic_samples {
+                let w = fold_src(f_h / g).max(floor);
+                let o = e_h.max(floor);
+                let r = (w - o).clamp(-RATIO_CLAMP_DB, RATIO_CLAMP_DB);
+                // Gate on the harmonic's own level.
+                let level = self.eval_env_db(&spec_db, f_h);
+                let gate = if level >= gate_hi {
+                    1.0
+                } else if level <= gate_lo {
+                    0.0
+                } else {
+                    (level - gate_lo) / (gate_hi - gate_lo)
+                };
+                r_h.push((f_h, r * gate));
+            }
+            (0..self.bins)
+                .map(|k| {
+                    let f = k as f64 * bin_hz;
+                    if f <= r_h[0].0 {
+                        r_h[0].1
+                    } else if f >= r_h[r_h.len() - 1].0 {
+                        r_h[r_h.len() - 1].1
+                    } else {
+                        let hi = r_h.partition_point(|&(hf, _)| hf < f);
+                        let (fa, da) = r_h[hi - 1];
+                        let (fb, db) = r_h[hi.min(r_h.len() - 1)];
+                        let t = ((f / fa).ln() / (fb / fa).ln()).clamp(0.0, 1.0);
+                        da + t * (db - da)
+                    }
+                })
+                .collect()
+        } else {
+            // --- Unvoiced: per-bin ratio + Bark smoothing -------------
+            let mut ratio_db: Vec<f64> = Vec::with_capacity(self.bins);
+            for (k, &env) in env_db.iter().enumerate() {
+                let f = k as f64 * bin_hz;
+                let w = fold_src(f / g).max(floor);
+                let o = env.max(floor);
+                let r = (w - o).clamp(-RATIO_CLAMP_DB, RATIO_CLAMP_DB);
+                // Empty-space gate keyed on the *bin* spectrum level:
+                // never reshape spectral silence.
+                let level = spec_db[k];
+                let gate = if level >= gate_hi {
+                    1.0
+                } else if level <= gate_lo {
+                    0.0
+                } else {
+                    (level - gate_lo) / (gate_hi - gate_lo)
+                };
+                ratio_db.push(r * gate);
+            }
+            smooth_bark(&ratio_db, &self.smooth_width_bins)
+        };
 
-        // Interpolate to bins (Bark domain) and convert to linear gain.
-        spectrum
-            .iter()
-            .enumerate()
-            .map(|(k, _)| {
-                let f = k as f64 * f64::from(self.rate) / ((self.bins - 1) * 2) as f64;
-                let b = bark(f);
-                let r_db = interp_bark(&self.bark_coords, &ratio, b);
-                10.0f64.powf(r_db / 20.0)
-            })
-            .collect()
+        // Cross-frame one-pole (kills residual frame-rate AM). The first
+        // engaged frame passes through unfiltered — initialising the
+        // state to 0 dB would dilute the first field by the pole
+        // coefficient (a 40 ms formant fade-in at stream starts).
+        if !self.smoothing_init {
+            self.prev_ratio_db.copy_from_slice(&ratio_db);
+            self.smoothing_init = true;
+        } else {
+            for (r, prev) in ratio_db.iter_mut().zip(&mut self.prev_ratio_db) {
+                *r = *prev + (*r - *prev) * self.smoothing_coef;
+                *prev = *r;
+            }
+        }
+
+        // Convert to linear gain.
+        ratio_db.iter().map(|r| 10.0f64.powf(r / 20.0)).collect()
+    }
+
+    /// Harmonic-sampled spectral envelope (dB, per bin): the magnitude
+    /// at each harmonic `h·f0` (linear bin interpolation), log-frequency
+    /// interpolation between harmonics, flat below the fundamental,
+    /// −12 dB/octave rolloff above the top harmonic. Falls back to the
+    /// cepstral true envelope when fewer than two harmonics fit below
+    /// Nyquist.
+    /// The per-bin harmonic envelope plus the raw `(Hz, dB)` harmonic
+    /// samples it was built from (used by the voiced warp path).
+    fn harmonic_envelope_with_samples(&self, mags: &[f64], f0: f64) -> (Vec<f64>, Vec<(f64, f64)>) {
+        let bin_hz = f64::from(self.rate) / ((self.bins - 1) * 2) as f64;
+        let mut harmonics: Vec<(f64, f64)> = Vec::new(); // (Hz, dB)
+        let mut h = 1usize;
+        while f0 * h as f64 <= self.nyquist {
+            let f = f0 * h as f64;
+            let pos = (f / bin_hz).clamp(0.0, (self.bins - 1) as f64);
+            let i = pos.floor() as usize;
+            let t = pos - i as f64;
+            let j = (i + 1).min(self.bins - 1);
+            let m = mags[i] * (1.0 - t) + mags[j] * t;
+            harmonics.push((f, 20.0 * (m + 1e-12).log10()));
+            h += 1;
+        }
+        if harmonics.len() < 2 {
+            return (self.true_envelope_db(mags, Some(f0)), harmonics);
+        }
+        let mut env = vec![0.0f64; self.bins];
+        for (k, e) in env.iter_mut().enumerate() {
+            let f = k as f64 * bin_hz;
+            *e = if f <= harmonics[0].0 {
+                harmonics[0].1
+            } else if f >= harmonics[harmonics.len() - 1].0 {
+                let (top_f, top_db) = harmonics[harmonics.len() - 1];
+                top_db - 12.0 * (f / top_f).log2().max(0.0)
+            } else {
+                // log-frequency interpolation between bracketing harmonics
+                let hi = harmonics.partition_point(|&(hf, _)| hf < f);
+                let (fa, da) = harmonics[hi - 1];
+                let (fb, db) = harmonics[hi.min(harmonics.len() - 1)];
+                let t = ((f / fa).ln() / (fb / fa).ln()).clamp(0.0, 1.0);
+                da + t * (db - da)
+            };
+        }
+        (env, harmonics)
     }
 
     /// Evaluate the per-bin envelope (dB) at an arbitrary frequency.
@@ -229,33 +381,20 @@ impl FormantProcessor {
     }
 }
 
-/// Moving-average smoothing over ±`half` neighbours (edges shrink the
-/// window; keeps length).
-fn smooth_circular(v: &[f64], half: usize) -> Vec<f64> {
-    if v.len() < 3 || half == 0 {
+/// Per-bin moving average with a per-bin radius (Bark-scaled): smooth
+/// across the critical band, neverrippling between adjacent bins.
+fn smooth_bark(v: &[f64], widths: &[usize]) -> Vec<f64> {
+    if v.is_empty() {
         return v.to_vec();
     }
     (0..v.len())
         .map(|i| {
-            let lo = i.saturating_sub(half);
-            let hi = (i + half + 1).min(v.len());
+            let w = widths.get(i).copied().unwrap_or(1).max(1);
+            let lo = i.saturating_sub(w);
+            let hi = (i + w + 1).min(v.len());
             v[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
         })
         .collect()
-}
-
-/// Linear interpolation of `vals` over ascending `coords` at `x`.
-fn interp_bark(coords: &[f64], vals: &[f64], x: f64) -> f64 {
-    if x <= coords[0] {
-        return vals[0];
-    }
-    if x >= coords[coords.len() - 1] {
-        return vals[vals.len() - 1];
-    }
-    let j = coords.partition_point(|&c| c < x).max(1);
-    let (c0, c1) = (coords[j - 1], coords[j]);
-    let t = (x - c0) / (c1 - c0).max(1e-12);
-    vals[j - 1] * (1.0 - t) + vals[j] * t
 }
 
 #[cfg(test)]
@@ -269,7 +408,7 @@ mod tests {
 
     fn processor() -> (realfft::RealFftPlanner<f64>, FormantProcessor) {
         let mut planner = realfft::RealFftPlanner::new();
-        let p = FormantProcessor::new(&mut planner, N, RATE);
+        let p = FormantProcessor::new(&mut planner, N, RATE, N / 4);
         (planner, p)
     }
 
@@ -362,46 +501,51 @@ mod tests {
 
     #[test]
     fn warp_field_moves_envelope_peak_by_g() {
-        let (_, p) = processor();
+        let (_, mut p) = processor();
         // Vowel with F1 = 730 Hz.
         let sig = ts::formant_vowel(196.0, &[(730.0, 10.0), (1090.0, 10.0)], 0.5, 48_000, RATE);
         let spec = mid_spectrum(&sig);
-        let env_before = p.true_envelope_db(
-            &spec.iter().map(|b| b.norm()).collect::<Vec<_>>(),
-            Some(196.0),
-        );
-        let bin_hz = RATE as f64 / N as f64;
-        let peak_before = peak_freq(&env_before, bin_hz, 300.0, 1000.0);
+        let mags: Vec<f64> = spec.iter().map(|b| b.norm()).collect();
 
+        // Harmonic samples before, and after applying the warp field
+        // (same estimator both sides — measurement bias cancels).
+        let harm_before = p.harmonic_envelope_with_samples(&mags, 196.0).1;
         let field = p.warp_field(&spec, 1.25, Some(196.0));
-        let warped: Vec<Complex64> = spec
+        let warped_mags: Vec<f64> = spec
             .iter()
             .zip(&field)
-            .map(|(b, &g)| Complex64::new(b.re * g, b.im * g))
+            .map(|(b, &g)| b.norm() * g)
             .collect();
-        let env_after = p.true_envelope_db(
-            &warped.iter().map(|b| b.norm()).collect::<Vec<_>>(),
-            Some(196.0),
-        );
-        let peak_after = peak_freq(&env_after, bin_hz, 300.0, 1500.0);
-        let expected = peak_before * 1.25;
-        assert!(
-            (peak_after - expected).abs() < expected * 0.05,
-            "F1 moved {peak_before:.0} -> {peak_after:.0}, expected ~{expected:.0}"
-        );
-    }
+        let harm_after = p.harmonic_envelope_with_samples(&warped_mags, 196.0).1;
 
-    fn peak_freq(env: &[f64], bin_hz: f64, lo: f64, hi: f64) -> f64 {
-        let (k_lo, k_hi) = ((lo / bin_hz) as usize, (hi / bin_hz) as usize);
-        let k = (k_lo..=k_hi.min(env.len() - 1))
-            .max_by(|&a, &b| env[a].total_cmp(&env[b]))
-            .expect("range");
-        k as f64 * bin_hz
+        let centroid = |h: &[(f64, f64)], lo: f64, hi: f64| {
+            let mut num = 0.0f64;
+            let mut den = 0.0f64;
+            for &(f, db) in h {
+                if (lo..=hi).contains(&f) {
+                    let pw = 10.0f64.powf(db / 10.0);
+                    num += pw * f;
+                    den += pw;
+                }
+            }
+            if den > 0.0 {
+                num / den
+            } else {
+                0.5 * (lo + hi)
+            }
+        };
+        let c_in = centroid(&harm_before, 300.0, 1600.0);
+        let c_out = centroid(&harm_after, 300.0, 2000.0);
+        let expected = c_in * 1.25;
+        assert!(
+            (c_out - expected).abs() < expected * 0.05,
+            "F1 harmonic centroid {c_in:.0} -> {c_out:.0}, expected ~{expected:.0}"
+        );
     }
 
     #[test]
     fn warp_field_identity_is_exact_noop() {
-        let (_, p) = processor();
+        let (_, mut p) = processor();
         let spec = mid_spectrum(&ts::formant_vowel(
             196.0,
             &[(730.0, 10.0)],
@@ -420,7 +564,7 @@ mod tests {
 
     #[test]
     fn warp_field_survives_spectral_zeros() {
-        let (_, p) = processor();
+        let (_, mut p) = processor();
         // Alternating zero bins = brutal spectral zeros.
         let mut spec = vec![Complex64::new(0.0, 0.0); p.bins];
         for k in (0..p.bins).step_by(2) {
@@ -443,7 +587,7 @@ mod tests {
 
     #[test]
     fn warp_field_folds_beyond_nyquist_without_nan() {
-        let (_, p) = processor();
+        let (_, mut p) = processor();
         let sig = ts::formant_vowel(
             150.0,
             &[(600.0, 8.0), (2400.0, 8.0), (8000.0, 8.0)],
@@ -461,7 +605,7 @@ mod tests {
     #[test]
     fn magnitude_only_warp_preserves_f0() {
         // Engine invariant #4 at module level: full STFT -> warp -> ISTFT.
-        let (_, p) = processor();
+        let (_, mut p) = processor();
         let (hop, n) = (N / 4, N);
         let sig = ts::formant_vowel(196.0, &[(730.0, 10.0), (1090.0, 10.0)], 0.5, 48_000, RATE);
         let mut planner = realfft::RealFftPlanner::new();

@@ -328,3 +328,121 @@ pub fn band_power_db(x: &[f32], rate: u32, lo: f64, hi: f64) -> f64 {
     let n = x.len() as f64;
     10.0 * (sum / (n * n) + 1e-30).log10()
 }
+
+/// Energy-weighted spectral centroid within `[lo, hi]` Hz (one FFT over
+/// the whole slice). A robust envelope-position metric: it moves exactly
+/// with the spectral envelope's displacement, immune to harmonic
+/// peak-picking ambiguity.
+#[must_use]
+pub fn band_centroid(x: &[f32], rate: u32, lo: f64, hi: f64) -> f64 {
+    if x.is_empty() {
+        return 0.0;
+    }
+    let mut planner = RealFftPlanner::new();
+    let r2c = planner.plan_fft_forward(x.len());
+    let mut input: Vec<f64> = x.iter().map(|v| f64::from(*v)).collect();
+    let mut spec = r2c.make_output_vec();
+    r2c.process(&mut input, &mut spec)
+        .expect("lengths pre-allocated");
+    let bin_hz = f64::from(rate) / x.len() as f64;
+    let (k_lo, k_hi) = (
+        ((lo / bin_hz).ceil() as usize).max(1),
+        ((hi / bin_hz).floor() as usize).min(spec.len().saturating_sub(1)),
+    );
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (k, b) in spec.iter().enumerate().take(k_hi + 1).skip(k_lo) {
+        let p = b.norm_sqr();
+        num += p * (k as f64 * bin_hz);
+        den += p;
+    }
+    if den > 1e-30 {
+        num / den
+    } else {
+        0.5 * (lo + hi)
+    }
+}
+
+/// Energy-weighted centroid of the harmonic peaks at `f0, 2·f0, …`
+/// inside `[lo, hi]` Hz — an envelope-position metric immune to
+/// harmonic-spacing changes (unlike plain band centroids, which shift
+/// when a pitch change re-grids the harmonics inside the band).
+#[must_use]
+pub fn harmonic_centroid(x: &[f32], rate: u32, f0: f64, lo: f64, hi: f64) -> f64 {
+    if x.is_empty() || f0 <= 0.0 {
+        return 0.5 * (lo + hi);
+    }
+    let mut planner = RealFftPlanner::new();
+    let r2c = planner.plan_fft_forward(x.len());
+    let mut input: Vec<f64> = x.iter().map(|v| f64::from(*v)).collect();
+    let mut spec = r2c.make_output_vec();
+    r2c.process(&mut input, &mut spec)
+        .expect("lengths pre-allocated");
+    let bin_hz = f64::from(rate) / x.len() as f64;
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    let mut h = 1usize;
+    while f0 * h as f64 <= hi {
+        let f = f0 * h as f64;
+        if f >= lo {
+            // Peak magnitude within +-1 bin of the harmonic.
+            let k = (f / bin_hz).round() as usize;
+            let hi = (k + 1).min(spec.len() - 1);
+            let mut m = 0.0f64;
+            for b in spec[k.saturating_sub(1)..=hi].iter() {
+                m = m.max(b.norm_sqr());
+            }
+            num += m * f;
+            den += m;
+        }
+        h += 1;
+    }
+    if den > 1e-30 {
+        num / den
+    } else {
+        0.5 * (lo + hi)
+    }
+}
+
+/// Energy-weighted centroid of 1/3-octave band levels within `[lo, hi]`
+/// Hz — a grid-independent envelope-position metric. Plain band and
+/// harmonic centroids are biased when a pitch shift re-grids the
+/// harmonic comb; third-octave band energies are not.
+#[must_use]
+pub fn third_octave_centroid(x: &[f32], rate: u32, lo: f64, hi: f64) -> f64 {
+    if x.is_empty() {
+        return 0.5 * (lo + hi);
+    }
+    let mut planner = RealFftPlanner::new();
+    let r2c = planner.plan_fft_forward(x.len());
+    let mut input: Vec<f64> = x.iter().map(|v| f64::from(*v)).collect();
+    let mut spec = r2c.make_output_vec();
+    r2c.process(&mut input, &mut spec)
+        .expect("lengths pre-allocated");
+    let bin_hz = f64::from(rate) / x.len() as f64;
+    let pow: Vec<f64> = spec.iter().map(|b| b.norm_sqr()).collect();
+    // 1/3-octave bands, 10 per decade, standard centres.
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    let mut f = 100.0f64;
+    while f < f64::from(rate) / 2.0 {
+        let (blo, bhi) = (f / 2f64.powf(1.0 / 6.0), f * 2f64.powf(1.0 / 6.0));
+        if bhi >= lo && blo <= hi {
+            let k_lo = ((blo / bin_hz).ceil() as usize).max(1);
+            let k_hi = ((bhi / bin_hz).floor() as usize).min(pow.len() - 1);
+            if k_hi >= k_lo {
+                let e: f64 = pow[k_lo..=k_hi].iter().sum();
+                // Fractional overlap with the measurement window.
+                let overlap = (bhi.min(hi) - blo.max(lo)) / (bhi - blo);
+                num += e * f * overlap;
+                den += e * overlap;
+            }
+        }
+        f *= 2f64.powf(1.0 / 3.0);
+    }
+    if den > 1e-30 {
+        num / den
+    } else {
+        0.5 * (lo + hi)
+    }
+}
