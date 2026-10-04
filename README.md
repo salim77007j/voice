@@ -22,11 +22,11 @@ in English with optional Arabic (RTL) localization, and real-time preview under 
 
 | Phase | Scope | State |
 |---|---|---|
-| 1 | Research + architecture plan | ✅ done — see [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md) |
+| 1 | Research + architecture plan | ✅ done — see [`docs/PHASE_1_REPORT.md`](docs/PHASE_1_REPORT.md) |
 | 2 | Scaffold + audio I/O (record, import, export, playback) | ✅ done — see [`docs/PHASE_2_REPORT.md`](docs/PHASE_2_REPORT.md) |
 | 3 | DSP engine (pitch / air / formant) | ✅ done — see [`docs/PHASE_3_REPORT.md`](docs/PHASE_3_REPORT.md) |
-| 4 | UI (Slint, EN + RTL) | ⏳ next |
-| 5 | CI + integration + testing | planned |
+| 4 | UI (Slint, EN + RTL) | ✅ done — see [`docs/PHASE_4_REPORT.md`](docs/PHASE_4_REPORT.md) + [`docs/phase4-screenshots/`](docs/phase4-screenshots/) |
+| 5 | CI + integration + testing | ⏳ next |
 | 6 | Final validation + v1.0.0 | planned |
 
 ## Technology
@@ -36,9 +36,29 @@ symphonia 0.5 (MP3 decode) · LAME 3.100 bundled (MP3 encode) · rubato 5 (resam
 rustfft/realfft (STFT, Phase 3). Full decision record with rejected alternatives:
 [`docs/ARCHITECTURE_PLAN.md`](docs/ARCHITECTURE_PLAN.md).
 
-## Try the engine today (pre-UI)
+## The application
 
-The Phase 3 binary exposes the full DSP engine from the command line:
+```sh
+cargo run --release -p mvl-app            # desktop UI (optionally: run FILE.wav)
+```
+
+A professional dark studio UI ("Precision Studio Dark", IBM Plex, teal accent):
+toolbar with 192 kHz recording and import/export, transport with sub-millisecond
+waveform zoom down to individual samples, the three precision modules bound
+**live** to the same engine the export uses, status telemetry (applied air gain,
+preview latency), and instant English ⇄ العربية switching with full RTL
+mirroring. Real renders of the UI (not mockups) are committed in
+[`docs/phase4-screenshots/`](docs/phase4-screenshots/).
+
+On headless machines the same UI can be rendered to PNG for verification:
+
+```sh
+micro-vocal-lab screenshot out.png take.wav --pitch 3 --air -30 --tract 140 --locale ar
+```
+
+## The engine from the command line
+
+The binary also exposes the full DSP headlessly:
 
 ```sh
 cargo run --release -p mvl-app -- process input.wav output.wav \
