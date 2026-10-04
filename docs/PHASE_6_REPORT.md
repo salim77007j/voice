@@ -1,6 +1,6 @@
 # Phase 6 Report — Full validation, evidence pack, v1.0.0
 
-**Status: COMPLETE · Date: 2026-10-04 · Head: `879ca7d` (CI hotfix) → tagged `v1.0.0` · Tests: 160 passed / 0 failed / 5 ignored · fmt + clippy `-D warnings` clean · CI green on all 5 OS legs + 4 release artifacts**
+**Status: COMPLETE · Date: 2026-10-04 · Head: `47e6e21` (= tagged `v1.0.0`) · Tests: 160 passed / 0 failed / 5 ignored · fmt + clippy `-D warnings` clean · CI green on all 5 OS legs + 4 release artifacts (tag run: 10/10 jobs)**
 
 Phase 6 scope (ARCHITECTURE_PLAN §14): *"full validation report with evidence pack, performance numbers, honest gaps, v1.0.0 tag."* This report is that deliverable. Everything claimed below is either machine-verified in this container, or machine-verified by GitHub Actions on a real runner — and every number carries its provenance.
 
@@ -37,15 +37,37 @@ Phase 6 scope (ARCHITECTURE_PLAN §14): *"full validation report with evidence p
 
 The 5 ignored tests are deliberate and stay ignored in CI: 2 need real clock-paced audio hardware (`#[ignore]`, wall-clock assertions), 2 are golden-fixture regenerators, 1 needs a real preview device. The ALSA-null virtual-audio path they would need is un-paced, so Phase 5 added 3 structure-only `MVL_VIRTUAL_AUDIO=1` smoke tests that *do* run on every Linux CI leg — device-path code executes on all 5 legs without lying about timing.
 
-### 1.2 CI on GitHub Actions (run of `879ca7d`, the exact `v1.0.0` code)
+### 1.2 CI on GitHub Actions (tag run of `v1.0.0` = `47e6e21`)
 
-<!-- CI_FINAL_RESULTS -->
+| Job | OS / image | Result | Duration |
+|---|---|---|---|
+| fmt + clippy | ubuntu-24.04 | ✅ success | 39 s |
+| test | ubuntu-22.04 | ✅ success | 134 s |
+| test | ubuntu-24.04 | ✅ success | 131 s |
+| test | windows-latest | ✅ success | 123 s |
+| test | macos-15 (arm64) | ✅ success | 113 s |
+| test | macos-15-intel (x86_64) | ✅ success | 669 s |
+| release | linux-x86_64 (ubuntu-22.04) | ✅ success | 318 s |
+| release | windows-x86_64 | ✅ success | 497 s |
+| release | macos-aarch64 (macos-15) | ✅ success | 330 s |
+| release | macos-x86_64 (macos-15-intel) | ✅ success | 740 s |
 
-**Provenance note:** this is the repository's *second-ever* CI run. The first (run #1, `dbf0251`) failed its two ubuntu-24.04 legs on a missing system library that no local check could catch — §5 records the full incident and fix. The numbers above are from the fixed workflow, on the tagged commit.
+Source: [run #5 — the `v1.0.0` tag run, `47e6e21`](https://github.com/salim77007j/voice/actions/runs/37208950133) (conclusion: **success**, 10/10 jobs), machine-captured in [`phase6-evidence/ci-run.txt`](phase6-evidence/ci-run.txt). Run #4 (`main`, identical tree) also completed **success** in full.
+
+**Provenance note:** the repository's CI has run five times during this phase and hit two live incidents — run #1 (`dbf0251`) failed two ubuntu-24.04 legs on a missing system library, and runs #2/#3 (`879ca7d`) stalled on a delisted macos-13 image. §5 records both in full, with the evidence captured before the dead runs were cancelled. The table above is the final pipeline — fixed workflow, GA runner labels, on the exact tagged commit — green end to end.
 
 ### 1.3 Release artifacts
 
-<!-- CI_ARTIFACTS -->
+Built and attached by the tag run (compression is the archive's; the binary itself is 21.64 MiB):
+
+| Artifact | Archive size | Retention |
+|---|---|---|
+| `linux-x86_64` | 10.24 MiB | 30 days |
+| `windows-x86_64` | 8.33 MiB | 30 days |
+| `macos-aarch64` | 7.43 MiB | 30 days |
+| `macos-x86_64` | 7.83 MiB | 30 days |
+
+Every archive contains the platform binary + `LICENSE` + `README.md`.
 
 ---
 
@@ -94,7 +116,9 @@ The suite's spine is the **invariant tests**, not happy paths: pitch shift ±12 
 
 ---
 
-## 5. Incident record: first CI run exposed an untestable-locally gap (fixed in `879ca7d`)
+## 5. Incident records: two live events, both caught by the process
+
+### 5.1 Run #1 — a missing system library no local check could catch (fixed in `879ca7d`)
 
 The repository's first-ever Actions run (#1, `dbf0251` — Phase 5's commits, pushed at the start of this phase) failed its two ubuntu-24.04 legs:
 
@@ -103,14 +127,18 @@ yeslogic-fontconfig-sys 6.0.1 build.rs panicked:
   Package fontconfig was not found in the pkg-config search path.
 ```
 
-`fontconfig` is a hard system dependency of Slint 1.18's font enumeration (`fontique → yeslogic-fontconfig-sys`). The dev container and the ubuntu-22.04 runner image both happen to ship fontconfig dev files, so every local "CI-leg proven" run and the 22.04 leg passed — the 24.04 image does not. A dependency audit (`cargo tree -i`, x86_64-unknown-linux-gnu) confirmed the only hard-linked system libraries are ALSA and fontconfig (`wayland-sys`/`glutin_glx_sys` are dlopen-mode; `libudev`/`libinput`/`libseat`-sys are not in the Linux target tree). All three Linux apt steps now install `libasound2-dev libfontconfig1-dev`; run #2 is green on the previously failing legs. Two honest lessons, recorded rather than buried: (1) "proven locally" ≠ "proven on CI" when the local environment silently satisfies a dependency, (2) the matrix earned its keep — the failure was leg-specific, exactly what multi-image testing exists to catch.
+`fontconfig` is a hard system dependency of Slint 1.18's font enumeration (`fontique → yeslogic-fontconfig-sys`). The dev container and the ubuntu-22.04 runner image both happen to ship fontconfig dev files, so every local "CI-leg proven" run and the 22.04 leg passed — the 24.04 image does not. A dependency audit (`cargo tree -i`, x86_64-unknown-linux-gnu) confirmed the only hard-linked system libraries are ALSA and fontconfig (`wayland-sys`/`glutin_glx_sys` are dlopen-mode; `libudev`/`libinput`/`libseat`-sys are not in the Linux target tree). All three Linux apt steps now install `libasound2-dev libfontconfig1-dev`; the re-run was green on the previously failing legs. Lessons, recorded rather than buried: (1) "proven locally" ≠ "proven on CI" when the local environment silently satisfies a dependency, (2) the matrix earned its keep — the failure was leg-specific, exactly what multi-image testing exists to catch.
+
+### 5.2 Runs #2/#3 — the hosted fleet moved underneath us (fixed in `47e6e21`)
+
+With fontconfig fixed, run #2 (`main`) and run #3 (first `v1.0.0` tag push, same tree) went green on **five of six legs within minutes** — lint, ubuntu 22.04/24.04, windows, macos-14 arm64 — and then `test (macos-13-x86_64)` sat in the queue for **~50 minutes without ever being assigned a runner, in both runs simultaneously**. The official `actions/runner-images` README (Sept 2026) explains: **macos-13 has been delisted from the hosted fleet entirely** (macos-14 is deprecated; the only GA macOS images are `macos-15` arm64 and `macos-15-intel` x64). The leg could never start — it would have queued to timeout. Both runs were cancelled (their 5-green job states captured in the evidence pack first), the matrix was migrated (`macos-13 → macos-15-intel`, `macos-14 → macos-15`), and the `v1.0.0` tag was re-pointed to the fixed commit — the tag had existed for under an hour with no consumers, and leaving it on a workflow that can never go green would have made its release gate a lie. `macos-15-intel` is the GA Intel label per the runner-images README and is already used by ~30k GitHub workflow files (koreader, saltstack, pypa/cibuildwheel); actionlint was upgraded 1.7.7 → 1.7.12, whose built-in label list recognizes it. Lesson: a CI matrix pinned to specific images is a living contract with the host fleet — deprecations arrive as silent queue-stalls, not errors, and only a timeout makes them visible.
 
 ---
 
 ## 6. Honest gaps (v1.0.0 final)
 
 1. **On-device verification is still pending a human.** No real microphone, speaker or display exists in the build container, so the claims that need them (192 kHz capture on real hardware, audible engine playback, live slider feel, keyboard-only navigation, RTL visual verdict) ship as a **kit**, not as evidence: `micro-vocal-lab selftest` + `docs/ONDEVICE.md` (10-minute protocol). The kit itself is machine-tested (160-suite); its failure path is tested too (it fails honestly, exit 1, on the un-paced null device).
-2. **CI has now run** (this phase closed P5 gap #1) — but exactly twice; the rust-cache is cold, and one GitHub-image regression (fontconfig) already happened. The matrix is the mitigation, not a guarantee.
+2. **CI has now run** (this phase closed P5 gap #1) — five runs total, and two live incidents already: a GitHub-image regression (fontconfig, §5.1) and a fleet delisting (macos-13, §5.2). The matrix + tag-gate pattern is the mitigation, not a guarantee; both were caught by exactly that pattern, which is the argument for keeping it.
 3. **Binary 21.64 MiB** vs §9's 10–18 MB aspiration (50 MB budget met): remaining weight is structural — the SVG chain behind femtovg's renderer, zbus shared by accessibility + dialogs, embedded IBM Plex (full statics chosen over subsetting for guaranteed glyph coverage of any future string).
 4. **Cross-platform numeric tolerance is ≤1e-4, not bit-exact** (rustfft per-CPU dispatch differs by platform). Bit-exactness is enforced on the fixture-generating platform; a policy, documented, not an accident.
 5. **Very long high-rate imports remain RAM-resident** (P4 §3.7): ≤48 kHz material and all recordings are disk-backed; a multi-hour 192 kHz *import* is the remaining case, deferred as out of profile for voice-take lengths.
@@ -121,7 +149,7 @@ yeslogic-fontconfig-sys 6.0.1 build.rs panicked:
 
 ## 7. Release: `v1.0.0`
 
-Tag `v1.0.0` is an annotated tag on `879ca7d` — the exact commit CI validated in §1 (hotfix on top of P5's `dbf0251`). The tag push re-runs the full pipeline (lint → 5-leg test → 4 release builds) on that same tree, and the resulting run's conclusion is the release gate; it attaches the artifacts:
+Tag `v1.0.0` is an annotated tag on `47e6e21` — the matrix-migration commit on top of the CI-hotfix `879ca7d` on top of P5's `dbf0251`; the full pipeline (lint → 5-leg test → 4 release builds) ran on exactly this tree and finished **success, 10/10 jobs** (§1.2). That run attached the artifacts:
 
 - `linux-x86_64` (built on ubuntu-22.04, glibc 2.35 baseline) — `micro-vocal-lab-linux-x86_64.tar.gz`
 - `windows-x86_64` — `micro-vocal-lab-windows-x86_64.zip`

@@ -1,0 +1,28 @@
+Micro-Vocal Lab — Phase 6 CI evidence
+repo: salim77007j/voice   run: 37208950133
+https://github.com/salim77007j/voice/actions/runs/37208950133
+captured: 2026-10-04T14:50:25Z
+
+run #5  sha=47e6e21  event=push  status=completed  conclusion=success
+
+=== jobs ===
+fmt + clippy                   completed  success     39s
+test (ubuntu-22.04)            completed  success    134s
+test (macos-15-arm64)          completed  success    113s
+test (windows-latest)          completed  success    123s
+test (macos-15-x86_64)         completed  success    669s
+test (ubuntu-24.04)            completed  success    131s
+release (linux-x86_64)         completed  success    318s
+release (macos-x86_64)         completed  success    740s
+release (windows-x86_64)       completed  success    497s
+release (macos-aarch64)        completed  success    330s
+
+=== artifacts (release jobs) ===
+macos-aarch64                 7.43 MiB  expires=2026-11-03T14:37:37Z
+linux-x86_64                 10.24 MiB  expires=2026-11-03T14:37:42Z
+macos-x86_64                  7.83 MiB  expires=2026-11-03T14:43:45Z
+windows-x86_64                8.33 MiB  expires=2026-11-03T14:40:10Z
+
+=== run #4 (main, same commit 47e6e21, for the record) ===
+run #4 sha=47e6e21 status=completed conclusion=success
+(full pipeline green, identical tree; artifacts also built)

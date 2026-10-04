@@ -47,3 +47,25 @@ done: docs/phase6-evidence/render-preview.wav (rendered 1.50 s of audio in 0.09 
 === 4. full test suite wall time (for the record) ===
 total passed: 160 in 65 s
 (suite wall time = fmt-free single run)
+
+=== INCIDENT ADDENDUM: macOS-13 image delisted (captured at cancel, 14:19Z) ===
+Both runs cancelled after ~50 min: test (macos-13-x86_64) never left the queue —
+image delisted from actions/runner-images (Sept 2026 README: only macos-15 x64
+(macos-15-intel) + arm64 (macos-15) remain GA; macos-14 deprecated, macos-13 gone).
+
+run #2 (main, 879ca7d) job states at cancel:
+  fmt + clippy                   completed  success
+  test (macos-14-arm64)          completed  success
+  test (ubuntu-22.04)            completed  success
+  test (ubuntu-24.04)            completed  success
+  test (windows-latest)          completed  success
+  test (macos-13-x86_64)         completed  cancelled
+  release (${{ matrix.name }})   completed  cancelled
+run #3 (tag v1.0.0, 879ca7d) job states at cancel:
+  fmt + clippy                   completed  success
+  test (macos-14-arm64)          completed  success
+  test (ubuntu-22.04)            completed  success
+  test (macos-13-x86_64)         completed  cancelled
+  test (ubuntu-24.04)            completed  success
+  test (windows-latest)          completed  success
+  release (${{ matrix.name }})   completed  cancelled
