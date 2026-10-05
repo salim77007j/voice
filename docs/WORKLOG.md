@@ -106,3 +106,17 @@ Append-only log. One entry per sub-item, per the phased execution protocol.
 
 **Phase 6 exit state:** protocol complete. v1.0.0 = 47e6e21 with green end-to-end CI on GA runner labels; 160 tests / fmt / clippy green locally and on all 5 legs; every §9 budget met with 9-28x margin; two live incidents (fontconfig gap, macos-13 delisting) caught, fixed and documented; final honest gaps enumerated in PHASE_6_REPORT §6 (on-device run pending a human).
 
+
+---
+
+## 2026-10-05 — Phase 8.1: V2 audit + strategy (V2 campaign opens)
+
+**8.1.1 Environment rebuild** — container reset again (4th time): rustup 1.99.0 reinstalled, sudo-less ALSA prefix rebuilt at `~/.local/alsa-dev` (libasound2-dev .deb extracted, `.so` relocated over the system runtime; `PKG_CONFIG_PATH` + `LIBRARY_PATH` both needed — the latter was newly required for the linker this time, recorded for the next reset). Repo re-cloned; origin/main verified at `v1.1.1` (`9c854cc`).
+
+**8.1.2 Audit** — all 13 docs + WORKLOG read; code inventory: mvl-core 5,243 / mvl-io 4,379 / mvl-app 4,676 Rust + 2,440 Slint LOC, 222 test fns. Full suite on the fresh toolchain: **217 passed / 0 failed / 5 ignored** — baseline claim reproduced exactly.
+
+**8.1.3 Competitive + DSP research (live web)** — Melodyne 5 (€99–699, DNA), RX 11/12 ($399–1199, Dialogue Isolate, combined De-noise/De-reverb, Spectral Recovery), Auto-Tune Pro 11 / AutoTune 2026, Adobe Podcast Enhance v2 (cloud-only — our privacy foil), Accentize dxRevive Pro (neural restoration, beats RX in reviews), Waves Clarity VX/Vocal Rider/CLA, Krisp/NVIDIA Broadcast; DSP: phase-locked PV refinements, ultra-light DDSP vocoders, LPC+differentiable DSP (MOS 4.36), DeepFilterNet-class enhancement.
+
+**8.1.4 Strategy** — `docs/V2_STRATEGY.md` written: honest audit (§1), landscape + positioning (§2), add/improve/reject tables (§3), classical-first DSP selection per module with a reserved ModelSlot (§4), hard perf/size budgets, roadmap 8.2–8.12 with measurable acceptance criteria (§5), benchmarking methodology + honesty rules (§6), risk register (§7), v2.0.0 quality bar (§8). Rejections documented with rationale: bundled neural weights, DNA polyphony, plugin formats, cloud anything, FFI Vorbis before pure-Rust FLAC.
+
+**Phase 8.1 exit state:** strategy + report + this entry committed locally. No push credential in this environment (Phase 5 precedent: commits stay local until a token is supplied). Baseline 217/217 verified. Waiting for "continue" → Phase 8.2 (playhead sync bug).
