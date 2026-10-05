@@ -48,6 +48,7 @@ gap, not a silent pass.
 | 3 | Record | *New Recording* arms red; a take records to disk; status shows the negotiated rate — if the device caps at 96/48 kHz the fallback notice is shown |
 | 4 | Preview with live sliders | during playback move pitch — audibly shifts within a hop (<3 ms, no clicks); air −100 % visibly ducks breaths on the meter; formant changes timbre without chipmunking |
 | 5 | Waveform | wheel-zoom reaches *sample level* (stem plot); *fit* restores; playhead tracks audio; click seeks |
+| 5b | **Playhead sync (Phase 8.2 protocol)** | play a **44.1 kHz** file and a **48 kHz** file (one import of each): during playback the line stays within ~1 UI frame (33 ms) of what you hear — never running ahead of the sound, no visible stepping/jumping; **pause** freezes exactly where audio stops and resume continues there; **click-seek** lands the line on the target with no leap; verdict unchanged after switching to عربي (RTL) |
 | 6 | Export via dialog | native save dialog; WAV export of a 192 kHz take stays full-rate; MP3 of a 48 kHz import round-trips |
 | 7 | عربي + RTL | language switch is instant; toolbar/status mirror; side panel moves left; sliders mirror their drag direction; digits stay Western |
 | 8 | Keyboard-only | unplug the mouse: Tab reaches every control (2 px teal focus ring), Space play/pause, arrows step 1 cent / 0.1 dB / 1 mm, Shift = 10×, Home/double-click resets |

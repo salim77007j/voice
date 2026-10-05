@@ -177,9 +177,9 @@ fn screenshot_command(args: &[String]) {
     }
     controller.set_params(params);
     if let Some(ph) = playhead {
-        let app = controller.window();
-        app.set_playhead(ph as f32);
-        app.set_show_playhead(true);
+        // Through the controller: playhead line, timecode text and
+        // visibility move together exactly as the live seek path does.
+        controller.park_playhead(ph);
     }
     // One honest UI tick: the analysis rack, meters and telemetry show
     // the same data the 30 fps timer would have published.

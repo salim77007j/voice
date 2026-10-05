@@ -10,7 +10,8 @@
 //! Module map (populated phase 2): `wav` — WAV import/export via hound,
 //! `mp3` — MP3 import (symphonia) and export (LAME), `resample` — rubato
 //! rate conversion, `recorder` — 192 kHz/32-bit capture, `player` +
-//! `transport` — playback with play/pause/stop/seek.
+//! `transport` — playback with play/pause/stop/seek, `playhead` —
+//! device-clock anchored audible-position tracking (phase 8.2 sync fix).
 
 pub mod channels;
 pub mod consent;
@@ -18,6 +19,7 @@ pub mod devices;
 mod error;
 pub mod mp3;
 pub mod player;
+pub mod playhead;
 pub mod recorder;
 pub mod resample;
 pub mod transport;
@@ -27,6 +29,7 @@ pub use devices::{DeviceInfo, DeviceInventory};
 pub use error::{Error, Result};
 pub use mp3::{Mp3Bitrate, Mp3Settings, VbrQuality};
 pub use player::{Player, PlayerCommand};
+pub use playhead::{audible_position_seconds, host_output_latency, PlayheadAnchor};
 pub use recorder::{RecordRequest, RecordingStats, SampleFmt};
 pub use transport::{Transport, TransportState};
 pub use wav::WavDepth;

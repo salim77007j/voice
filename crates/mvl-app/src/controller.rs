@@ -353,6 +353,18 @@ impl Controller {
         push_all_params(&self.app, &self.state);
     }
 
+    /// Park the playhead at `seconds` for a static render (screenshot
+    /// path): publishes the same three properties the live seek path
+    /// and the 30 fps tick publish — line position, timecode text and
+    /// visibility — so headless evidence shows exactly what a paused
+    /// transport at that position shows.
+    pub fn park_playhead(&self, seconds: f64) {
+        let t = seconds.clamp(0.0, self.state.inner.borrow().duration());
+        self.app.set_playhead(t as f32);
+        self.app.set_position_text(format::timecode(t).into());
+        self.app.set_show_playhead(true);
+    }
+
     /// Current parameters.
     #[must_use]
     pub fn params(&self) -> VocalParams {

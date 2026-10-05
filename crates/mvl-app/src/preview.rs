@@ -50,15 +50,22 @@ pub enum PreviewCmd {
 struct Shared {
     playing: AtomicBool,
     generation: AtomicU32,
+    /// Feeder write cursor (diagnostics since the 8.2 sync fix).
     fed: AtomicU64,
+    /// Samples handed to the device since the last bump (flushed ring
+    /// content is not counted — it never reached the device).
     consumed: AtomicU64,
     base: AtomicU64,
     state: AtomicU8,
     sample_rate: AtomicU32,
     channels: AtomicU32,
+    /// Track length in stream frames (clamps the playhead).
+    length_frames: AtomicU64,
     /// `f32::to_bits` of the deepest applied air gain (live meter).
     air_db_bits: AtomicU32,
     guard_engaged: AtomicBool,
+    /// Device-clock anchored audible position (phase 8.2 sync fix).
+    playhead: mvl_io::playhead::PlayheadAnchor,
 }
 
 impl Shared {
@@ -72,9 +79,32 @@ impl Shared {
             state: AtomicU8::new(0),
             sample_rate: AtomicU32::new(48_000),
             channels: AtomicU32::new(1),
+            length_frames: AtomicU64::new(0),
             air_db_bits: AtomicU32::new(0.0f32.to_bits()),
             guard_engaged: AtomicBool::new(false),
+            playhead: mvl_io::playhead::PlayheadAnchor::new(),
         })
+    }
+
+    /// Audible position in seconds (shared playhead math — device
+    /// latency compensated, clamped to the handed cursor; see
+    /// `mvl_io::playhead::audible_position_seconds`).
+    fn position_seconds(&self) -> f64 {
+        let base = self.base.load(Ordering::Acquire);
+        let consumed = self.consumed.load(Ordering::Acquire);
+        let rate = f64::from(self.sample_rate.load(Ordering::Acquire).max(1));
+        let channels = u64::from(self.channels.load(Ordering::Acquire).max(1));
+        let length = self.length_frames.load(Ordering::Acquire) as f64 / rate;
+        mvl_io::playhead::audible_position_seconds(
+            &self.playhead,
+            rate,
+            channels,
+            base,
+            consumed,
+            length,
+            self.playing.load(Ordering::Acquire),
+            std::time::Instant::now(),
+        )
     }
 }
 
@@ -249,6 +279,9 @@ impl PreviewPlayer {
         shared
             .channels
             .store(u32::from(adapted.channels), Ordering::Release);
+        shared
+            .length_frames
+            .store(adapted.frames() as u64, Ordering::Release);
 
         // Algorithmic latency probe: a throwaway engine of the same shape
         // (the real engines are constructed inside the feeder thread —
@@ -289,7 +322,14 @@ impl PreviewPlayer {
             cpal::SampleFormat::F32 => device
                 .build_output_stream::<f32, _, _>(
                     stream_config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| sink.fill(data),
+                    move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                        let ts = info.timestamp();
+                        sink.fill(
+                            data,
+                            std::time::Instant::now(),
+                            mvl_io::playhead::host_output_latency(&ts),
+                        );
+                    },
                     err_cb,
                     None,
                 )
@@ -299,7 +339,14 @@ impl PreviewPlayer {
                     stream_config,
                     {
                         let mut shim = SinkShim::from(sink);
-                        move |data: &mut [i16], _: &cpal::OutputCallbackInfo| shim.fill_i16(data)
+                        move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            shim.fill_i16(
+                                data,
+                                std::time::Instant::now(),
+                                mvl_io::playhead::host_output_latency(&ts),
+                            );
+                        }
                     },
                     err_cb,
                     None,
@@ -310,7 +357,14 @@ impl PreviewPlayer {
                     stream_config,
                     {
                         let mut shim = SinkShim::from(sink);
-                        move |data: &mut [i32], _: &cpal::OutputCallbackInfo| shim.fill_i32(data)
+                        move |data: &mut [i32], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            shim.fill_i32(
+                                data,
+                                std::time::Instant::now(),
+                                mvl_io::playhead::host_output_latency(&ts),
+                            );
+                        }
                     },
                     err_cb,
                     None,
@@ -321,7 +375,14 @@ impl PreviewPlayer {
                     stream_config,
                     {
                         let mut shim = SinkShim::from(sink);
-                        move |data: &mut [u16], _: &cpal::OutputCallbackInfo| shim.fill_u16(data)
+                        move |data: &mut [u16], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            shim.fill_u16(
+                                data,
+                                std::time::Instant::now(),
+                                mvl_io::playhead::host_output_latency(&ts),
+                            );
+                        }
                     },
                     err_cb,
                     None,
@@ -332,7 +393,14 @@ impl PreviewPlayer {
                     stream_config,
                     {
                         let mut shim = SinkShim::from(sink);
-                        move |data: &mut [u32], _: &cpal::OutputCallbackInfo| shim.fill_u32(data)
+                        move |data: &mut [u32], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            shim.fill_u32(
+                                data,
+                                std::time::Instant::now(),
+                                mvl_io::playhead::host_output_latency(&ts),
+                            );
+                        }
                     },
                     err_cb,
                     None,
@@ -343,7 +411,14 @@ impl PreviewPlayer {
                     stream_config,
                     {
                         let mut shim = SinkShim::from(sink);
-                        move |data: &mut [u8], _: &cpal::OutputCallbackInfo| shim.fill_u8(data)
+                        move |data: &mut [u8], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            shim.fill_u8(
+                                data,
+                                std::time::Instant::now(),
+                                mvl_io::playhead::host_output_latency(&ts),
+                            );
+                        }
                     },
                     err_cb,
                     None,
@@ -419,16 +494,12 @@ impl PreviewPlayer {
         }
     }
 
-    /// Audible position in seconds (lock-free counters).
+    /// Audible position in seconds: extrapolated from the device-clock
+    /// playhead anchor (latency compensated, clamped to the handed
+    /// cursor) — the value the UI playhead shows.
     #[must_use]
     pub fn position_seconds(&self) -> f64 {
-        let base = self.shared.base.load(Ordering::Acquire);
-        let fed = self.shared.fed.load(Ordering::Acquire);
-        let consumed = self.shared.consumed.load(Ordering::Acquire);
-        let samples = base + fed.saturating_sub(consumed);
-        let channels = u64::from(self.shared.channels.load(Ordering::Acquire).max(1));
-        let rate = f64::from(self.shared.sample_rate.load(Ordering::Acquire).max(1));
-        (samples / channels) as f64 / rate
+        self.shared.position_seconds()
     }
 
     /// Deepest applied air & breath gain (dB) — the live meter value.
@@ -469,13 +540,16 @@ impl Drop for PreviewPlayer {
     }
 }
 
-/// Consumer-side fill logic (generation flush + lock-free counters),
-/// isolated from cpal for unit testing.
+/// Consumer-side fill logic (generation flush + lock-free counters +
+/// playhead anchor publication), isolated from cpal for unit testing.
 struct SinkLogic {
     consumer: Consumer<f32>,
     shared: Arc<Shared>,
     observed_generation: u32,
     consumed_here: u64,
+    /// Instant of the previous callback (latency fallback when the host
+    /// reports no playback instant).
+    last_callback_at: Option<std::time::Instant>,
 }
 
 impl SinkLogic {
@@ -486,10 +560,13 @@ impl SinkLogic {
             shared,
             observed_generation,
             consumed_here: 0,
+            last_callback_at: None,
         }
     }
 
-    fn fill(&mut self, out: &mut [f32]) {
+    /// Fill the device buffer and publish the playhead anchor (see
+    /// `mvl_io::playhead` — real-time safe: atomics only).
+    fn fill(&mut self, out: &mut [f32], at: std::time::Instant, latency: Option<Duration>) {
         let gen = self.shared.generation.load(Ordering::Acquire);
         if gen != self.observed_generation {
             self.flush();
@@ -499,21 +576,44 @@ impl SinkLogic {
             out.fill(0.0);
             return;
         }
+
+        // First sample this callback will hand to the device (frames).
+        let base = self.shared.base.load(Ordering::Acquire);
+        let channels = u64::from(self.shared.channels.load(Ordering::Acquire).max(1));
+        let first_frame = base.saturating_add(self.consumed_here) / channels;
+
         let mut filled: &mut [f32] = out;
+        let mut popped_total: usize = 0;
         while !filled.is_empty() {
             let (popped, rest) = self.consumer.pop_partial_slice(filled);
             if popped.is_empty() {
                 rest.fill(0.0);
                 break;
             }
+            popped_total += popped.len();
             self.consumed_here += popped.len() as u64;
             filled = rest;
         }
-        self.shared
-            .consumed
-            .store(self.consumed_here, Ordering::Release);
+        if popped_total > 0 {
+            self.shared
+                .consumed
+                .store(self.consumed_here, Ordering::Release);
+            // Host-reported device latency when available, else half the
+            // measured callback period (see mvl-io player, 8.2).
+            let latency = match latency {
+                Some(d) if !d.is_zero() => d,
+                _ => self
+                    .last_callback_at
+                    .map(|prev| at.saturating_duration_since(prev) / 2)
+                    .unwrap_or(Duration::ZERO),
+            };
+            self.shared.playhead.update(first_frame, at, latency);
+        }
+        self.last_callback_at = Some(at);
     }
 
+    /// Discard buffered audio (seek/stop): not handed to the device, so
+    /// not counted; the handed counter restarts for the new generation.
     fn flush(&mut self) {
         let mut scratch = [0.0f32; 1024];
         loop {
@@ -521,11 +621,9 @@ impl SinkLogic {
             if popped.is_empty() {
                 break;
             }
-            self.consumed_here += popped.len() as u64;
         }
-        self.shared
-            .consumed
-            .store(self.consumed_here, Ordering::Release);
+        self.consumed_here = 0;
+        self.shared.consumed.store(0, Ordering::Release);
     }
 }
 
@@ -547,43 +645,48 @@ impl From<SinkLogic> for SinkShim {
 }
 
 impl SinkShim {
-    fn fill_f32_into(&mut self, len: usize) -> &[f32] {
+    fn fill_f32_into(
+        &mut self,
+        len: usize,
+        at: std::time::Instant,
+        latency: Option<Duration>,
+    ) -> &[f32] {
         self.scratch.clear();
         self.scratch.resize(len, 0.0);
-        self.inner.fill(&mut self.scratch);
+        self.inner.fill(&mut self.scratch, at, latency);
         &self.scratch
     }
 
-    fn fill_i16(&mut self, data: &mut [i16]) {
-        let s = self.fill_f32_into(data.len());
+    fn fill_i16(&mut self, data: &mut [i16], at: std::time::Instant, latency: Option<Duration>) {
+        let s = self.fill_f32_into(data.len(), at, latency);
         for (d, &v) in data.iter_mut().zip(s) {
             *d = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
         }
     }
 
-    fn fill_i32(&mut self, data: &mut [i32]) {
-        let s = self.fill_f32_into(data.len());
+    fn fill_i32(&mut self, data: &mut [i32], at: std::time::Instant, latency: Option<Duration>) {
+        let s = self.fill_f32_into(data.len(), at, latency);
         for (d, &v) in data.iter_mut().zip(s) {
             *d = (v.clamp(-1.0, 1.0) * 2147483647.0) as i32;
         }
     }
 
-    fn fill_u16(&mut self, data: &mut [u16]) {
-        let s = self.fill_f32_into(data.len());
+    fn fill_u16(&mut self, data: &mut [u16], at: std::time::Instant, latency: Option<Duration>) {
+        let s = self.fill_f32_into(data.len(), at, latency);
         for (d, &v) in data.iter_mut().zip(s) {
             *d = ((v.clamp(-1.0, 1.0) + 1.0) * 32767.5) as u16;
         }
     }
 
-    fn fill_u32(&mut self, data: &mut [u32]) {
-        let s = self.fill_f32_into(data.len());
+    fn fill_u32(&mut self, data: &mut [u32], at: std::time::Instant, latency: Option<Duration>) {
+        let s = self.fill_f32_into(data.len(), at, latency);
         for (d, &v) in data.iter_mut().zip(s) {
             *d = ((v.clamp(-1.0, 1.0) + 1.0) * 2147483647.5) as u32;
         }
     }
 
-    fn fill_u8(&mut self, data: &mut [u8]) {
-        let s = self.fill_f32_into(data.len());
+    fn fill_u8(&mut self, data: &mut [u8], at: std::time::Instant, latency: Option<Duration>) {
+        let s = self.fill_f32_into(data.len(), at, latency);
         for (d, &v) in data.iter_mut().zip(s) {
             *d = ((v.clamp(-1.0, 1.0) + 1.0) * 127.5) as u8;
         }
@@ -728,11 +831,19 @@ fn push_all(producer: &mut Producer<f32>, data: &[f32]) {
     }
 }
 
+/// Invalidate buffered audio (seek/stop): publish the new base, reset the
+/// counters, freeze the playhead anchor at the new base, then bump the
+/// generation (order matters: a sink observing the new generation is
+/// guaranteed to see the new base and zeroed counters).
 fn bump_generation(shared: &Shared, fed_since_bump: &mut u64, base_samples: u64) {
-    shared.generation.fetch_add(1, Ordering::AcqRel);
-    *fed_since_bump = 0;
-    shared.fed.store(0, Ordering::Release);
     shared.base.store(base_samples, Ordering::Release);
+    shared.consumed.store(0, Ordering::Release);
+    shared.fed.store(0, Ordering::Release);
+    shared
+        .playhead
+        .reset_frozen(base_samples / u64::from(shared.channels.load(Ordering::Acquire).max(1)));
+    *fed_since_bump = 0;
+    shared.generation.fetch_add(1, Ordering::AcqRel);
 }
 
 // Channel/rate adaptation now lives in `mvl_io::channels::adapt` (one
@@ -903,13 +1014,15 @@ mod tests {
         producer.push_entire_slice(&[1.0f32; 64]).unwrap();
         shared.fed.store(64, Ordering::Release);
         let mut out = [0.0f32; 32];
-        sink.fill(&mut out);
+        sink.fill(&mut out, std::time::Instant::now(), None);
         assert_eq!(&out[..], &[1.0f32; 32][..]);
-        // bump generation: buffered 32 samples must be dropped
+        // bump generation: buffered 32 samples must be dropped, and the
+        // handed counter must restart (8.2: flushed ≠ handed).
         shared.generation.fetch_add(1, Ordering::AcqRel);
         let mut out2 = [5.0f32; 32];
-        sink.fill(&mut out2);
+        sink.fill(&mut out2, std::time::Instant::now(), None);
         assert!(out2.iter().all(|&v| v == 0.0), "stale audio flushed");
+        assert_eq!(shared.consumed.load(Ordering::Acquire), 0);
     }
 
     /// Hardware smoke test — requires a real output device.
