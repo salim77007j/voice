@@ -54,7 +54,27 @@ enum UiMessage {
 }
 
 /// Convenience alias for the shared UI state.
-type State = Rc<RefCell<Inner>>;
+type State = Rc<UiState>;
+
+/// UI-thread shared state.
+///
+/// The worker→UI inbox endpoints deliberately live **outside** the
+/// `RefCell` (v1.1.1 BUG 2 fix): `ui_tick` drains `rx` while message
+/// handlers freely borrow/mutate `inner`. When these lived inside
+/// `Inner`, the drain loop's `while let` scrutinee temporary held a
+/// shared `Ref` across the entire loop body, and `install_session`'s
+/// `borrow_mut()` on the same cell panicked with "RefCell already
+/// borrowed" — the Windows import crash (controller.rs:977).
+/// Crossbeam endpoints are thread-safe and need no interior mutability,
+/// so moving them out makes that class of re-entrancy bug impossible
+/// by construction.
+struct UiState {
+    inner: RefCell<Inner>,
+    /// Sender half cloned into every worker spawn.
+    tx: crossbeam_channel::Sender<UiMessage>,
+    /// Receiver half drained by the UI timer (`ui_tick`).
+    rx: crossbeam_channel::Receiver<UiMessage>,
+}
 
 struct Inner {
     session: Option<Session>,
@@ -66,10 +86,6 @@ struct Inner {
     recording: Option<(Recorder, PathBuf)>,
     /// guard against concurrent import/export workers
     busy: Arc<AtomicBool>,
-    /// inbox from worker threads (drained by the UI timer).
-    inbox: crossbeam_channel::Receiver<UiMessage>,
-    /// sender half handed to workers (cloned per spawn).
-    inbox_tx: crossbeam_channel::Sender<UiMessage>,
     /// Device picker (BUG 1/3): `None` = automatic (fallback chain);
     /// `Some(device id)` = the user's explicit choice.
     selected_input: Option<String>,
@@ -116,27 +132,29 @@ impl Controller {
     #[must_use]
     pub fn new(app: crate::AppWindow) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded::<UiMessage>();
-        let state: State = Rc::new(RefCell::new(Inner {
-            session: None,
-            player: None,
-            params: VocalParams::neutral(),
-            view: ViewSpan::full(1.0),
-            locale: "en".into(),
-            recording: None,
-            busy: Arc::new(AtomicBool::new(false)),
-            inbox: rx,
-            inbox_tx: tx,
-            selected_input: None,
-            selected_output: None,
-            input_devices: Vec::new(),
-            output_devices: Vec::new(),
-            rta: RtaAnalyzer::new(RTA_FFT_SIZE),
-            rta_out: RtaSnapshot::default(),
-            rta_peaks: [0.0; RTA_BANDS],
-            rta_mono: vec![0.0; RTA_FFT_SIZE],
-            meter_peaks: [0.0; 2],
-            clip_until: None,
-        }));
+        let state: State = Rc::new(UiState {
+            tx,
+            rx,
+            inner: RefCell::new(Inner {
+                session: None,
+                player: None,
+                params: VocalParams::neutral(),
+                view: ViewSpan::full(1.0),
+                locale: "en".into(),
+                recording: None,
+                busy: Arc::new(AtomicBool::new(false)),
+                selected_input: None,
+                selected_output: None,
+                input_devices: Vec::new(),
+                output_devices: Vec::new(),
+                rta: RtaAnalyzer::new(RTA_FFT_SIZE),
+                rta_out: RtaSnapshot::default(),
+                rta_peaks: [0.0; RTA_BANDS],
+                rta_mono: vec![0.0; RTA_FFT_SIZE],
+                meter_peaks: [0.0; 2],
+                clip_until: None,
+            }),
+        });
 
         macro_rules! wire {
             ($cb:ident, $fn:ident) => {{
@@ -326,7 +344,7 @@ impl Controller {
     /// Override parameters programmatically (screenshot/tests path).
     pub fn set_params(&self, params: VocalParams) {
         {
-            let mut inner = self.state.borrow_mut();
+            let mut inner = self.state.inner.borrow_mut();
             inner.params = params.sanitized();
             if let Some(player) = &inner.player {
                 let _ = player.set_params(inner.params);
@@ -338,18 +356,13 @@ impl Controller {
     /// Current parameters.
     #[must_use]
     pub fn params(&self) -> VocalParams {
-        self.state.borrow().params
+        self.state.inner.borrow().params
     }
 
     /// Window handle access (tests, screenshot renderer).
     #[must_use]
     pub fn window(&self) -> &crate::AppWindow {
         &self.app
-    }
-
-    /// Worker-thread inbox sender (cloned out of the shared state).
-    fn inbox_tx(state: &State) -> crossbeam_channel::Sender<UiMessage> {
-        state.borrow().inbox_tx.clone()
     }
 }
 
@@ -358,7 +371,8 @@ impl Controller {
 // ---------------------------------------------------------------------------
 
 fn import_clicked(app: &crate::AppWindow, state: &State) {
-    if state.borrow().busy.load(Ordering::Acquire) || state.borrow().recording.is_some() {
+    if state.inner.borrow().busy.load(Ordering::Acquire) || state.inner.borrow().recording.is_some()
+    {
         return;
     }
     let Some(path) = rfd::FileDialog::new()
@@ -372,7 +386,7 @@ fn import_clicked(app: &crate::AppWindow, state: &State) {
 }
 
 fn import_async(app: &crate::AppWindow, state: &State, path: PathBuf) {
-    let busy = state.borrow().busy.clone();
+    let busy = state.inner.borrow().busy.clone();
     if busy.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -382,7 +396,7 @@ fn import_async(app: &crate::AppWindow, state: &State, path: PathBuf) {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     set_status(app, "importing", &label, "");
-    let tx = Controller::inbox_tx(state);
+    let tx = state.tx.clone();
     std::thread::spawn(move || {
         // BUG 2 fix: a panic inside hound/symphonia used to unwind this
         // worker silently — SessionReady never arrived, the busy flag
@@ -416,11 +430,11 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>, what: &str) -> String 
 }
 
 fn export_clicked(app: &crate::AppWindow, state: &State) {
-    if state.borrow().busy.load(Ordering::Acquire) {
+    if state.inner.borrow().busy.load(Ordering::Acquire) {
         return;
     }
     let (default_name, session) = {
-        let inner = state.borrow();
+        let inner = state.inner.borrow();
         let Some(session) = &inner.session else {
             return;
         };
@@ -439,15 +453,15 @@ fn export_clicked(app: &crate::AppWindow, state: &State) {
         return;
     };
 
-    let busy = state.borrow().busy.clone();
+    let busy = state.inner.borrow().busy.clone();
     if busy.swap(true, Ordering::AcqRel) {
         return;
     }
     app.set_busy(true);
     app.set_export_progress(0);
     set_status(app, "rendering", "", "");
-    let tx = Controller::inbox_tx(state);
-    let params = state.borrow().params;
+    let tx = state.tx.clone();
+    let params = state.inner.borrow().params;
     std::thread::spawn(move || {
         // BUG 4: render/export panics must surface as typed errors, not
         // freeze the busy flag.
@@ -482,7 +496,7 @@ fn export_clicked(app: &crate::AppWindow, state: &State) {
 fn devices_clicked(app: &crate::AppWindow, state: &State) {
     let inv = mvl_io::devices::list();
     let (in_idx, out_idx) = {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         inner.input_devices = inv.inputs.clone();
         inner.output_devices = inv.outputs.clone();
         (
@@ -564,17 +578,18 @@ fn device_id_for_label(devices: &[mvl_io::DeviceInfo], label: &str) -> Option<St
 /// ComboBox selection: "Automatic…" = fallback chain; a device label
 /// pins recording to that device.
 fn set_input_device(app: &crate::AppWindow, state: &State, label: &str) {
-    let id = device_id_for_label(&state.borrow().input_devices, label);
+    let id = device_id_for_label(&state.inner.borrow().input_devices, label);
     let index = match &id {
         None => 0,
         Some(id) => state
+            .inner
             .borrow()
             .input_devices
             .iter()
             .position(|d| d.id() == *id)
             .map_or(0, |p| p as i32 + 1),
     };
-    state.borrow_mut().selected_input = id.clone();
+    state.inner.borrow_mut().selected_input = id.clone();
     app.set_input_device_index(index);
     // The next recording uses the new device; the status line confirms it.
     match &id {
@@ -584,10 +599,11 @@ fn set_input_device(app: &crate::AppWindow, state: &State, label: &str) {
 }
 
 fn set_output_device(app: &crate::AppWindow, state: &State, label: &str) {
-    let id = device_id_for_label(&state.borrow().output_devices, label);
+    let id = device_id_for_label(&state.inner.borrow().output_devices, label);
     let index = match &id {
         None => 0,
         Some(id) => state
+            .inner
             .borrow()
             .output_devices
             .iter()
@@ -595,7 +611,7 @@ fn set_output_device(app: &crate::AppWindow, state: &State, label: &str) {
             .map_or(0, |p| p as i32 + 1),
     };
     {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         inner.selected_output = id;
         // rebuild the player on the new device at next play
         inner.player = None;
@@ -607,23 +623,23 @@ fn set_output_device(app: &crate::AppWindow, state: &State, label: &str) {
 
 /// Open the user-selected input device, if any (recording path).
 fn open_selected_input(state: &State) -> Option<Result<cpal::Device, mvl_io::Error>> {
-    let id = state.borrow().selected_input.clone()?;
+    let id = state.inner.borrow().selected_input.clone()?;
     Some(mvl_io::devices::open_by_id(&id))
 }
 
 fn toggle_recording(app: &crate::AppWindow, state: &State) {
-    let recorder = state.borrow_mut().recording.take();
+    let recorder = state.inner.borrow_mut().recording.take();
     if let Some((recorder, temp_path)) = recorder {
         // Stopping: `Recorder::stop` joins the writer and finalizes the
         // WAV quickly on this thread; the slow part (192 kHz → 48 kHz
         // preview resample + mipmap) goes to a worker.
-        let busy = state.borrow().busy.clone();
+        let busy = state.inner.borrow().busy.clone();
         busy.store(true, Ordering::Release);
         app.set_busy(true);
         app.set_recording(false);
         set_status(app, "importing", "recording", "");
         let result = recorder.stop().map_err(|e| e.to_string());
-        let tx = Controller::inbox_tx(state);
+        let tx = state.tx.clone();
         match result {
             Ok(stats) if stats.frames == 0 => {
                 // Tapped stop before any audio arrived — an empty session
@@ -673,7 +689,7 @@ fn toggle_recording(app: &crate::AppWindow, state: &State) {
         };
         match started {
             Ok(recorder) => {
-                state.borrow_mut().recording = Some((recorder, temp));
+                state.inner.borrow_mut().recording = Some((recorder, temp));
                 app.set_recording(true);
                 set_status(app, "recording", "00:00", "192 kHz");
             }
@@ -692,13 +708,14 @@ fn toggle_recording(app: &crate::AppWindow, state: &State) {
 
 fn play_pause(app: &crate::AppWindow, state: &State) {
     let playing = state
+        .inner
         .borrow()
         .player
         .as_ref()
         .map(|p| p.state() == mvl_io::TransportState::Playing)
         .unwrap_or(false);
     if playing {
-        if let Some(p) = &state.borrow().player {
+        if let Some(p) = &state.inner.borrow().player {
             let _ = p.pause();
         }
         app.set_playing(false);
@@ -706,7 +723,7 @@ fn play_pause(app: &crate::AppWindow, state: &State) {
         return;
     }
 
-    let mut inner = state.borrow_mut();
+    let mut inner = state.inner.borrow_mut();
     if inner.player.is_none() {
         let preview = inner.session.as_ref().map(|s| Arc::clone(&s.preview));
         let selected_output = inner.selected_output.clone();
@@ -754,7 +771,7 @@ fn play_pause(app: &crate::AppWindow, state: &State) {
         }
         drop(inner);
     }
-    if let Some(p) = &state.borrow().player {
+    if let Some(p) = &state.inner.borrow().player {
         let _ = p.play();
     }
     app.set_playing(true);
@@ -762,7 +779,7 @@ fn play_pause(app: &crate::AppWindow, state: &State) {
 }
 
 fn stop_playback(app: &crate::AppWindow, state: &State) {
-    let mut inner = state.borrow_mut();
+    let mut inner = state.inner.borrow_mut();
     if let Some(p) = &inner.player {
         let _ = p.stop();
     }
@@ -780,8 +797,8 @@ fn rewind(app: &crate::AppWindow, state: &State) {
 }
 
 fn seek_to(app: &crate::AppWindow, state: &State, seconds: f64) {
-    let t = seconds.clamp(0.0, state.borrow().duration());
-    if let Some(p) = &state.borrow().player {
+    let t = seconds.clamp(0.0, state.inner.borrow().duration());
+    if let Some(p) = &state.inner.borrow().player {
         let _ = p.seek(t);
     }
     app.set_playhead(t as f32);
@@ -790,7 +807,7 @@ fn seek_to(app: &crate::AppWindow, state: &State, seconds: f64) {
 }
 
 fn zoom(app: &crate::AppWindow, state: &State, anchor: f64, direction: i32) {
-    let mut inner = state.borrow_mut();
+    let mut inner = state.inner.borrow_mut();
     let d = inner.duration();
     let rate = inner.preview_rate();
     let factor = if direction > 0 { 0.6 } else { 1.0 / 0.6 };
@@ -801,7 +818,7 @@ fn zoom(app: &crate::AppWindow, state: &State, anchor: f64, direction: i32) {
 }
 
 fn zoom_fit(app: &crate::AppWindow, state: &State) {
-    let mut inner = state.borrow_mut();
+    let mut inner = state.inner.borrow_mut();
     inner.view = ViewSpan::full(inner.duration());
     let view = inner.view;
     drop(inner);
@@ -809,7 +826,7 @@ fn zoom_fit(app: &crate::AppWindow, state: &State) {
 }
 
 fn set_selection(app: &crate::AppWindow, state: &State, a: f64, b: f64) {
-    let d = state.borrow().duration();
+    let d = state.inner.borrow().duration();
     let (a, b) = (a.clamp(0.0, d), b.clamp(0.0, d));
     app.set_sel_start(a as f32);
     app.set_sel_end(b as f32);
@@ -817,7 +834,7 @@ fn set_selection(app: &crate::AppWindow, state: &State, a: f64, b: f64) {
 }
 
 fn refresh_waveform(app: &crate::AppWindow, state: &State) {
-    let inner = state.borrow();
+    let inner = state.inner.borrow();
     let Some(session) = &inner.session else {
         return;
     };
@@ -861,7 +878,7 @@ fn push_view(app: &crate::AppWindow, state: &State, view: ViewSpan) {
 
 fn set_pitch(app: &crate::AppWindow, state: &State, v: f32) {
     {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         inner.params.pitch_semitones = v;
         let params = inner.params;
         if let Some(p) = &inner.player {
@@ -873,7 +890,7 @@ fn set_pitch(app: &crate::AppWindow, state: &State, v: f32) {
 
 fn set_air(app: &crate::AppWindow, state: &State, v: i32) {
     {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         inner.params.air_percent = v;
         let params = inner.params;
         if let Some(p) = &inner.player {
@@ -885,7 +902,7 @@ fn set_air(app: &crate::AppWindow, state: &State, v: i32) {
 
 fn set_tract(app: &crate::AppWindow, state: &State, v: f32) {
     {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         inner.params.tract_mm = v;
         let params = inner.params;
         if let Some(p) = &inner.player {
@@ -933,7 +950,7 @@ fn commit_tract(app: &crate::AppWindow, state: &State, text: &str) {
 }
 
 fn push_all_params(app: &crate::AppWindow, state: &State) {
-    let p = state.borrow().params.sanitized();
+    let p = state.inner.borrow().params.sanitized();
     app.set_pitch_semitones(p.pitch_semitones);
     app.set_air_percent(p.air_percent);
     app.set_tract_mm(p.tract_mm);
@@ -951,7 +968,7 @@ fn push_all_params(app: &crate::AppWindow, state: &State) {
 // ---- language -------------------------------------------------------------
 
 fn set_language(app: &crate::AppWindow, state: &State, locale: &str) {
-    state.borrow_mut().locale = locale.to_string();
+    state.inner.borrow_mut().locale = locale.to_string();
     app.global::<crate::Translations>()
         .set_locale(locale.into());
     let result = slint::select_bundled_translation(if locale == "ar" { "ar" } else { "" });
@@ -974,7 +991,7 @@ fn install_session(
     let depth = session.bit_depth_text.clone();
     let channels = session.channels;
     {
-        let mut inner = state.borrow_mut();
+        let mut inner = state.inner.borrow_mut();
         if let Some(p) = params {
             inner.params = p;
         }
@@ -1011,11 +1028,21 @@ fn set_status(app: &crate::AppWindow, key: &str, a1: &str, a2: &str) {
 // ---- timer ------------------------------------------------------------------
 
 fn ui_tick(app: &crate::AppWindow, state: &State) {
-    // 1) drain the worker inbox
-    while let Ok(msg) = state.borrow().inbox.try_recv() {
+    // 1) drain the worker inbox.
+    //
+    //    The receiver lives OUTSIDE the RefCell (v1.1.1 BUG 2 fix).
+    //    Previously this read `while let Ok(msg) =
+    //    state.borrow().inbox.try_recv()`: the `Ref` temporary in the
+    //    `while let` scrutinee stays alive for the whole loop body
+    //    (Rust 2021 temporary-lifetime rule), so the first drained
+    //    `SessionReady` message hit `install_session`'s `borrow_mut()`
+    //    and panicked with "RefCell already borrowed" — killing every
+    //    real import on the desktop app. Draining the cell-free
+    //    receiver means no borrow is held while handlers run.
+    while let Ok(msg) = state.rx.try_recv() {
         match msg {
             UiMessage::SessionReady(result) => {
-                let busy = state.borrow().busy.clone();
+                let busy = state.inner.borrow().busy.clone();
                 busy.store(false, Ordering::Release);
                 app.set_busy(false);
                 match result {
@@ -1027,7 +1054,7 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
                 app.set_export_progress((p * 100.0).round() as i32);
             }
             UiMessage::ExportDone(result) => {
-                let busy = state.borrow().busy.clone();
+                let busy = state.inner.borrow().busy.clone();
                 busy.store(false, Ordering::Release);
                 app.set_busy(false);
                 app.set_export_progress(0);
@@ -1040,7 +1067,7 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
     }
 
     // 2) live transport + telemetry
-    let mut inner = state.borrow_mut();
+    let mut inner = state.inner.borrow_mut();
     let playing = inner
         .player
         .as_ref()

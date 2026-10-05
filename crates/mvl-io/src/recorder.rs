@@ -50,7 +50,7 @@ impl Default for RecordRequest {
 /// the three desktop platforms — v1.0.0 only handled F32/I16/U16 and
 /// *refused to record* on devices that offered anything else, e.g. ALSA
 /// S32-only hardware or exclusive-mode WASAPI i32 endpoints).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleFmt {
     /// 32-bit IEEE float — the studio path, no conversion needed.
     F32,
@@ -114,7 +114,7 @@ impl ConfigRange {
 }
 
 /// The configuration the recorder will actually run with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NegotiatedConfig {
     /// Agreed sample rate in Hz.
     pub sample_rate: u32,
@@ -204,6 +204,104 @@ pub fn default_host_name() -> String {
     cpal::default_host().id().name().to_string()
 }
 
+/// Hard cap on negotiation-ladder length — pathological hosts can report
+/// dozens of ranges; more than this many *stream-open* attempts would
+/// waste time on devices that are clearly refusing everything.
+const MAX_LADDER: usize = 24;
+
+/// Build the ordered list of stream configurations to *actually try* on
+/// one device (v1.1.1 BUG 1 fix).
+///
+/// Negotiating from the reported ranges alone is not enough: a host can
+/// accept a capability query and still refuse the stream open (WASAPI
+/// shared mode wants the mix format; exclusive-mode hardware wants the
+/// exact format). The ladder therefore walks from the ideal config down
+/// to "anything this device reports", and [`Recorder::start_on`]
+/// attempts an *open* for each rung until one plays:
+///
+/// 0. the classic [`negotiate`] pick (best studio config, v1.1.0 rules)
+/// 1. requested rate × requested channels
+/// 2. requested rate × mono
+/// 3. 48 kHz × requested channels
+/// 4. 48 kHz × mono
+/// 5. 44.1 kHz × requested channels
+/// 6. 44.1 kHz × mono
+/// 7. the device's own default config (on WASAPI this is the shared-mode
+///    mix format, which the engine always accepts)
+/// 8. every reported range's best and minimum representatives
+///
+/// Within rungs 1–6 every sample format is tried in [`SampleFmt::ALL`]
+/// preference order, but only combinations the device actually reports.
+/// The result is deduplicated and capped at [`MAX_LADDER`] entries.
+#[must_use]
+pub fn negotiation_ladder(
+    ranges: &[ConfigRange],
+    request: &RecordRequest,
+    device_default: Option<NegotiatedConfig>,
+) -> Vec<NegotiatedConfig> {
+    let mut ladder: Vec<NegotiatedConfig> = Vec::new();
+    let push = |cfg: NegotiatedConfig, ladder: &mut Vec<NegotiatedConfig>| {
+        if !ladder.contains(&cfg) && ladder.len() < MAX_LADDER {
+            ladder.push(cfg);
+        }
+    };
+
+    // 0) classic negotiation pick
+    if let Some(cfg) = negotiate(ranges, request) {
+        push(cfg, &mut ladder);
+    }
+    // 1..=6) explicit rate × channel rungs, formats in preference order
+    let mono = 1;
+    for (rate, channels) in [
+        (request.target_rate, request.channels),
+        (request.target_rate, mono),
+        (48_000, request.channels),
+        (48_000, mono),
+        (44_100, request.channels),
+        (44_100, mono),
+    ] {
+        for &format in &SampleFmt::ALL {
+            if ranges
+                .iter()
+                .any(|r| r.format == format && r.channels == channels && r.contains_rate(rate))
+            {
+                push(
+                    NegotiatedConfig {
+                        sample_rate: rate,
+                        channels,
+                        format,
+                    },
+                    &mut ladder,
+                );
+            }
+        }
+    }
+    // 7) the device's default config, trusted as-is
+    if let Some(cfg) = device_default {
+        push(cfg, &mut ladder);
+    }
+    // 8) every reported range: best (max) rate first, then its floor
+    for r in ranges {
+        push(
+            NegotiatedConfig {
+                sample_rate: r.max_rate,
+                channels: r.channels,
+                format: r.format,
+            },
+            &mut ladder,
+        );
+        push(
+            NegotiatedConfig {
+                sample_rate: r.min_rate,
+                channels: r.channels,
+                format: r.format,
+            },
+            &mut ladder,
+        );
+    }
+    ladder
+}
+
 /// Name of the default input device, if one exists.
 ///
 /// # Errors
@@ -274,6 +372,8 @@ impl Recorder {
         let candidates = crate::devices::fallback_order(&inv.inputs, &default_host);
 
         let mut last_err: Option<Error> = None;
+        let mut attempted = 0usize;
+        let mut all_access_denied = true;
         for cand in candidates {
             let dev = match crate::devices::open_by_id(&cand.id()) {
                 Ok(d) => d,
@@ -289,9 +389,25 @@ impl Recorder {
                         "mvl-io: input device '{}' failed to open, trying next: {e}",
                         cand.label()
                     );
+                    attempted += 1;
+                    if !crate::consent::is_access_denied(&e.to_string()) {
+                        all_access_denied = false;
+                    }
                     last_err = Some(e);
                 }
             }
+        }
+        // Total failure: don't leave a header-only session WAV behind —
+        // each attempt's WavWriter truncated it, but nothing was captured.
+        let _ = std::fs::remove_file(path);
+        if attempted > 0 && all_access_denied {
+            // Every device returned E_ACCESSDENIED: this is the OS privacy
+            // gate, not a per-device or format problem — say exactly that
+            // (v1.1.1 BUG 1: on Windows, include the live consent-store
+            // state and the exact settings to change).
+            return Err(crate::consent::access_denied_error(&format!(
+                "tried {attempted} input device(s)"
+            )));
         }
         Err(match last_err {
             Some(e) if inv.inputs.len() <= 1 => e,
@@ -306,6 +422,13 @@ impl Recorder {
     }
 
     /// Start recording from a specific device.
+    ///
+    /// Walks the full [`negotiation_ladder`] and attempts an actual
+    /// stream open for each rung until one plays (v1.1.1 BUG 1 fix):
+    /// a capability query alone cannot predict what the stream API will
+    /// accept, so negotiation now means *opening*, not just choosing.
+    /// Every failed attempt is logged with its rung and reason so users
+    /// can diagnose device problems from the console output.
     ///
     /// # Errors
     /// Same as [`Recorder::start`].
@@ -324,39 +447,68 @@ impl Recorder {
             })
             .collect::<Vec<_>>();
 
-        let config = negotiate(&ranges, &request)
-            .or_else(|| {
-                // Capability negotiation found nothing at studio rates — fall
-                // back to whatever the device calls its default, as long as
-                // it speaks a format we understand.
-                let default = device.default_input_config().ok()?;
-                let format = SampleFmt::from_cpal(default.sample_format())?;
-                Some(NegotiatedConfig {
-                    sample_rate: default.sample_rate(),
-                    channels: default.channels(),
-                    format,
-                })
+        let device_default = device.default_input_config().ok().and_then(|d| {
+            SampleFmt::from_cpal(d.sample_format()).map(|format| NegotiatedConfig {
+                sample_rate: d.sample_rate(),
+                channels: d.channels(),
+                format,
             })
-            .or_else(|| {
-                // Last resort: the device exposes *some* input config we
-                // can consume even if it is below studio rate — an 8/16/
-                // 22.05 kHz capture beats refusing to record. `min_rate`
-                // is always inside the range by construction.
-                let first = ranges.first()?;
-                Some(NegotiatedConfig {
-                    sample_rate: first.min_rate,
-                    channels: first.channels,
-                    format: first.format,
-                })
-            })
-            .ok_or_else(|| {
-                Error::Device(format!(
-                    "input device '{}' offers no supported sample format",
-                    device
-                ))
-            })?;
+        });
 
-        Self::spawn(device, path, config, request.target_rate)
+        let ladder = negotiation_ladder(&ranges, &request, device_default);
+        if ladder.is_empty() {
+            return Err(Error::Device(format!(
+                "input device '{}' offers no supported sample format",
+                device
+            )));
+        }
+
+        let total = ladder.len();
+        let mut last_err: Option<Error> = None;
+        for (i, config) in ladder.into_iter().enumerate() {
+            match Self::spawn(device, path, config, request.target_rate) {
+                Ok(rec) => {
+                    if i > 0 {
+                        eprintln!(
+                            "mvl-io: '{}' opened on negotiation rung {}/{}: \
+                             {} Hz, {} ch, {:?} (requested {} Hz)",
+                            device,
+                            i + 1,
+                            total,
+                            config.sample_rate,
+                            config.channels,
+                            config.format,
+                            request.target_rate
+                        );
+                    }
+                    return Ok(rec);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "mvl-io: '{}' rung {}/{} ({} Hz, {} ch, {:?}) failed: {e}",
+                        device,
+                        i + 1,
+                        total,
+                        config.sample_rate,
+                        config.channels,
+                        config.format
+                    );
+                    let denied = crate::consent::is_access_denied(&e.to_string());
+                    last_err = Some(e);
+                    if denied {
+                        // The OS privacy gate blocks every format on this
+                        // device identically — stop hammering it and let
+                        // the caller's classification take over.
+                        eprintln!(
+                            "mvl-io: access denied by the OS privacy gate; \
+                             skipping remaining formats on this device"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("non-empty ladder ran at least one attempt"))
     }
 
     fn spawn(
@@ -736,6 +888,152 @@ mod tests {
         let ranges = vec![range(44_100, 384_000, 1, SampleFmt::F32)];
         let got = negotiate(&ranges, &RecordRequest::default()).unwrap();
         assert_eq!(got.sample_rate, 192_000);
+    }
+
+    // ---- negotiation ladder (v1.1.1 BUG 1) ---------------------------------
+
+    fn cfg(rate: u32, ch: u16, f: SampleFmt) -> NegotiatedConfig {
+        NegotiatedConfig {
+            sample_rate: rate,
+            channels: ch,
+            format: f,
+        }
+    }
+
+    #[test]
+    fn ladder_starts_with_classic_pick_then_requested_rung() {
+        let ranges = vec![
+            range(44_100, 192_000, 1, SampleFmt::F32),
+            range(44_100, 48_000, 1, SampleFmt::I16),
+        ];
+        let ladder = negotiation_ladder(&ranges, &RecordRequest::default(), None);
+        assert_eq!(
+            ladder[0],
+            cfg(192_000, 1, SampleFmt::F32),
+            "rung 0 = negotiate()"
+        );
+        // rung 1 (192k × 1ch): F32 already pushed; I16 is *not reported*
+        // at 192 kHz, so nothing else at this rate may appear.
+        assert!(
+            !ladder.contains(&cfg(192_000, 1, SampleFmt::I16)),
+            "unreported combos must never be attempted"
+        );
+        // next new rung: 48 kHz × F32 (rung 3), before 44.1 kHz rungs.
+        assert_eq!(ladder[1], cfg(48_000, 1, SampleFmt::F32));
+        let rates: Vec<u32> = ladder.iter().map(|c| c.sample_rate).collect();
+        let pos48 = rates.iter().position(|&r| r == 48_000).unwrap();
+        let pos441 = rates.iter().position(|&r| r == 44_100).unwrap();
+        assert!(
+            pos48 < pos441,
+            "48 kHz rungs must come before 44.1 kHz: {rates:?}"
+        );
+    }
+
+    #[test]
+    fn ladder_puts_device_default_after_44k_rungs() {
+        let ranges = vec![range(8_000, 16_000, 1, SampleFmt::I16)]; // telephony only
+        let default = Some(cfg(16_000, 1, SampleFmt::I16));
+        let ladder = negotiation_ladder(&ranges, &RecordRequest::default(), default);
+        assert_eq!(
+            ladder[0],
+            cfg(16_000, 1, SampleFmt::I16),
+            "default is rung 7"
+        );
+        // No 44.1/48/192 rung is reported, so only rung 8's floor
+        // representative (8 kHz — better than refusing) follows.
+        assert_eq!(ladder.len(), 2);
+        assert_eq!(ladder[1], cfg(8_000, 1, SampleFmt::I16));
+    }
+
+    #[test]
+    fn ladder_tries_mono_when_only_mono_exists() {
+        // Requested stereo, device is mono-only: the mono rungs must carry
+        // the only usable config.
+        let ranges = vec![range(44_100, 44_100, 1, SampleFmt::I16)];
+        let req = RecordRequest {
+            channels: 2,
+            ..RecordRequest::default()
+        };
+        let ladder = negotiation_ladder(&ranges, &req, None);
+        assert!(ladder.contains(&cfg(44_100, 1, SampleFmt::I16)));
+        // No stereo config may appear (none is reported).
+        assert!(ladder.iter().all(|c| c.channels == 1));
+    }
+
+    #[test]
+    fn ladder_trusts_device_default_even_unreported() {
+        // WASAPI case: ranges can come back empty-ish while the default
+        // config (the shared-mode mix format) is the one that opens.
+        let default = Some(cfg(48_000, 2, SampleFmt::F32));
+        let ladder = negotiation_ladder(&[], &RecordRequest::default(), default);
+        assert_eq!(ladder, vec![cfg(48_000, 2, SampleFmt::F32)]);
+    }
+
+    #[test]
+    fn ladder_empty_when_nothing_reported_and_no_default() {
+        assert!(negotiation_ladder(&[], &RecordRequest::default(), None).is_empty());
+    }
+
+    #[test]
+    fn ladder_is_deduplicated() {
+        let ranges = vec![
+            range(44_100, 48_000, 1, SampleFmt::F32),
+            range(48_000, 48_000, 1, SampleFmt::F32), // same effective configs
+        ];
+        let ladder = negotiation_ladder(
+            &ranges,
+            &RecordRequest {
+                target_rate: 48_000,
+                channels: 1,
+            },
+            None,
+        );
+        let mut seen = std::collections::HashSet::new();
+        for c in &ladder {
+            assert!(seen.insert(*c), "duplicate rung {c:?} in {ladder:?}");
+        }
+    }
+
+    #[test]
+    fn ladder_includes_reported_range_representatives_last() {
+        // An exotic device reporting 8 kHz-only I16 (below studio rate):
+        // negotiate() refuses it, rungs 1–6 skip it (not 44.1+), but
+        // rung 8 must still offer it — an 8 kHz capture beats no capture.
+        let ranges = vec![range(8_000, 8_000, 1, SampleFmt::I16)];
+        let ladder = negotiation_ladder(&ranges, &RecordRequest::default(), None);
+        assert_eq!(ladder.last(), Some(&cfg(8_000, 1, SampleFmt::I16)));
+    }
+
+    #[test]
+    fn ladder_caps_at_max_entries() {
+        // Pathological host reporting 40 disjoint ranges.
+        let ranges: Vec<ConfigRange> = (0..40)
+            .map(|i| {
+                range(
+                    8_000 + i * 100,
+                    8_100 + i * 100,
+                    1 + (i % 8) as u16,
+                    SampleFmt::F32,
+                )
+            })
+            .collect();
+        let ladder = negotiation_ladder(&ranges, &RecordRequest::default(), None);
+        assert!(
+            ladder.len() <= super::MAX_LADDER,
+            "ladder too long: {}",
+            ladder.len()
+        );
+    }
+
+    #[test]
+    fn ladder_prefers_f32_over_i16_within_a_rung() {
+        let ranges = vec![
+            range(48_000, 48_000, 1, SampleFmt::I16),
+            range(48_000, 48_000, 1, SampleFmt::F32),
+        ];
+        let ladder = negotiation_ladder(&ranges, &RecordRequest::default(), None);
+        let first48 = ladder.iter().find(|c| c.sample_rate == 48_000).unwrap();
+        assert_eq!(first48.format, SampleFmt::F32);
     }
 
     /// Hardware smoke test — requires a real input device. Run manually:

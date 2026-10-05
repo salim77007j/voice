@@ -13,6 +13,7 @@
 //! `transport` — playback with play/pause/stop/seek.
 
 pub mod channels;
+pub mod consent;
 pub mod devices;
 mod error;
 pub mod mp3;
