@@ -180,3 +180,58 @@ msgstr "الإدخال"
 
 msgid "OUTPUT"
 msgstr "الإخراج"
+
+# --- EQ panel (Phase 8.3) ---
+msgid "EQUALIZER"
+msgstr "المُعادِل"
+
+msgid "ON"
+msgstr "تشغيل"
+
+msgid "BYPASS"
+msgstr "تجاوز"
+
+msgid "Bypass the whole equalizer (bit-exact)"
+msgstr "تجاوز المُعادِل بالكامل (بدون أي تغيير بالبت)"
+
+msgid "Preset"
+msgstr "إعداد مسبق"
+
+msgid "Reset the equalizer to flat"
+msgstr "إعادة المُعادِل إلى الاستجابة المستوية"
+
+msgid "Low Shelf"
+msgstr "رفّ الترددات المنخفضة"
+
+msgid "Low-Mid Bell"
+msgstr "جرس المنخفض المتوسط"
+
+msgid "High-Mid Bell"
+msgstr "جرس المرتفع المتوسط"
+
+msgid "High Shelf"
+msgstr "رفّ الترددات المرتفعة"
+
+msgid "Bypass"
+msgstr "تجاوز"
+
+msgid "Freq"
+msgstr "التردد"
+
+msgid "Gain"
+msgstr "الكسب"
+
+msgid "Flat"
+msgstr "مستوٍ"
+
+msgid "Vocal Presence"
+msgstr "حضور صوتي"
+
+msgid "De-Mud"
+msgstr "إزالة الكدرة"
+
+msgid "Air Boost"
+msgstr "تعزيز الهواء"
+
+msgid "De-Harsh"
+msgstr "تنعيم الحدّة"

@@ -17,17 +17,27 @@ pub const MIN_TRACT_MM: f32 = 100.0;
 /// Maximum selectable vocal-tract length (very large adult perception).
 pub const MAX_TRACT_MM: f32 = 260.0;
 
+use crate::eq::EqParams;
+
 /// Pitch shift range in semitones (±1 octave).
 pub const MAX_PITCH_SEMITONES: f32 = 12.0;
 
 /// Air & breath slider range in percent of full effect (both directions).
 pub const MAX_AIR_PERCENT: i32 = 100;
 
-/// The three precision sliders, as published to the DSP engine.
+/// The three precision sliders plus the channel EQ, as published to the
+/// DSP engine.
 ///
 /// Invariants are enforced by [`VocalParams::sanitized`]: every field is
 /// clamped into its documented range so the engine can rely on the values
 /// without defensive checks in inner loops.
+///
+/// Phase 8.3 note: the struct grew by the EQ block (4 bands × 4 fields +
+/// master flag ≈ 68 bytes, still plain `Copy`). It travels the same
+/// parameter channel as before (`PreviewCmd::SetParams`, `Mutex` slot) —
+/// never the audio callback — so the lock-free/real-time contract is
+/// unchanged; the versioned `#[repr(C)]` block from the strategy risk
+/// table only becomes necessary if params ever move through raw atomics.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VocalParams {
     /// Pitch shift in semitones, range `−12.00 ..= +12.00`.
@@ -39,6 +49,9 @@ pub struct VocalParams {
     /// Perceived vocal-tract length in millimetres, range
     /// `100.0 ..= 260.0`. [`NEUTRAL_TRACT_MM`] is the identity.
     pub tract_mm: f32,
+    /// Four-band parametric EQ (Phase 8.3), applied after the vocal
+    /// chain's true-peak guard. Neutral/flat/disabled = bit-exact.
+    pub eq: EqParams,
 }
 
 impl VocalParams {
@@ -49,13 +62,23 @@ impl VocalParams {
             pitch_semitones: 0.0,
             air_percent: 0,
             tract_mm: NEUTRAL_TRACT_MM,
+            eq: EqParams::neutral(),
         }
     }
 
-    /// True when this set equals [`VocalParams::neutral`]; the engine uses
-    /// this to engage the bit-exact bypass path.
+    /// True when the *vocal* sliders are at the identity (pitch, air,
+    /// tract) — regardless of the EQ, which has its own bypass logic.
+    #[must_use]
+    pub fn vocal_neutral(&self) -> bool {
+        self.pitch_semitones == 0.0 && self.air_percent == 0 && self.tract_mm == NEUTRAL_TRACT_MM
+    }
+
+    /// True when this set equals [`VocalParams::neutral`] — vocal sliders
+    /// neutral **and** the EQ acoustically inert (master bypassed, or
+    /// every band bypassed/flat). The engine uses this to engage the
+    /// bit-exact bypass path.
     pub fn is_neutral(&self) -> bool {
-        *self == Self::neutral()
+        self.vocal_neutral() && !self.eq.is_active()
     }
 
     /// Return a copy with every field clamped into its documented range.
@@ -79,6 +102,7 @@ impl VocalParams {
             } else {
                 NEUTRAL_TRACT_MM
             },
+            eq: self.eq.sanitized(),
         }
     }
 
@@ -141,9 +165,28 @@ mod tests {
         assert_eq!(p.pitch_semitones, 0.0);
         assert_eq!(p.air_percent, 0);
         assert_eq!(p.tract_mm, NEUTRAL_TRACT_MM);
+        assert!(!p.eq.is_active());
         assert!(p.is_neutral());
+        assert!(p.vocal_neutral());
         assert_eq!(p.pitch_ratio(), 1.0);
         assert_eq!(p.formant_ratio(), 1.0);
+    }
+
+    /// Phase 8.3: EQ-only engagement must not spoil the vocal-chain
+    /// neutrality decisions, and a bypassed/flat EQ keeps neutrality.
+    #[test]
+    fn eq_fields_participate_in_neutrality() {
+        let mut p = VocalParams::neutral();
+        p.eq.low.gain_db = 3.0;
+        assert!(!p.is_neutral(), "active EQ = not neutral");
+        assert!(p.vocal_neutral(), "but the vocal sliders still are");
+
+        p.eq.enabled = false;
+        assert!(p.is_neutral(), "master-bypassed EQ is inert again");
+
+        p.eq.enabled = true;
+        p.eq.low.enabled = false;
+        assert!(p.is_neutral(), "bypassed band with gain is inert");
     }
 
     #[test]
@@ -152,6 +195,7 @@ mod tests {
             pitch_semitones: 99.0,
             air_percent: 500,
             tract_mm: 5.0,
+            ..VocalParams::neutral()
         }
         .sanitized();
         assert_eq!(p.pitch_semitones, MAX_PITCH_SEMITONES);
@@ -162,11 +206,25 @@ mod tests {
             pitch_semitones: -99.0,
             air_percent: -500,
             tract_mm: 900.0,
+            ..VocalParams::neutral()
         }
         .sanitized();
         assert_eq!(p.pitch_semitones, -MAX_PITCH_SEMITONES);
         assert_eq!(p.air_percent, -MAX_AIR_PERCENT);
         assert_eq!(p.tract_mm, MAX_TRACT_MM);
+    }
+
+    /// Phase 8.3: the EQ block is sanitized together with the sliders.
+    #[test]
+    fn sanitization_covers_the_eq() {
+        let mut p = VocalParams::neutral();
+        p.eq.high_mid.freq = 99_999.0;
+        p.eq.high_mid.gain_db = 99.0;
+        let s = p.sanitized();
+        assert_eq!(s.eq.high_mid.freq, crate::eq::EQ_MAX_FREQ_HZ);
+        assert_eq!(s.eq.high_mid.gain_db, crate::eq::EQ_MAX_GAIN_DB);
+        // Sanitizing twice is a fixpoint (idempotent).
+        assert_eq!(s.sanitized(), s);
     }
 
     #[test]
@@ -175,6 +233,7 @@ mod tests {
             pitch_semitones: f32::NAN,
             air_percent: 0,
             tract_mm: f32::INFINITY,
+            ..VocalParams::neutral()
         }
         .sanitized();
         assert_eq!(p.pitch_semitones, 0.0);

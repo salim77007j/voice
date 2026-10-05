@@ -13,6 +13,7 @@
 pub mod analysis;
 pub mod breath;
 pub mod engine;
+pub mod eq;
 pub mod error;
 pub mod formant;
 pub mod limiter;
@@ -25,6 +26,7 @@ pub mod testsupport;
 pub use analysis::{ClassSmoother, FrameAnalyzer, FrameClass, FrameFeatures};
 pub use breath::{BreathEdit, BreathProcessor};
 pub use engine::{RenderResult, VocalEngine};
+pub use eq::{Biquad, EqBandKind, EqBandParams, EqParams, EqPreset, EqProcessor, EQ_PRESETS};
 pub use error::EngineError;
 pub use formant::FormantProcessor;
 pub use limiter::{guard_offline, sample_peak, true_peak};

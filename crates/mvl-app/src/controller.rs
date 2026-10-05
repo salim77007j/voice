@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use mvl_core::eq::{response_curve_db, EqParams, DEFAULT_BAND_FREQS, EQ_CURVE_POINTS, EQ_PRESETS};
 use mvl_core::params::{MAX_PITCH_SEMITONES, NEUTRAL_TRACT_MM};
 use mvl_core::spectrum::{RtaAnalyzer, RtaSnapshot, CLIP_DBFS, RTA_BANDS};
 use mvl_core::VocalParams;
@@ -288,6 +289,53 @@ impl Controller {
             app.on_set_language(move |l| {
                 if let Some(app) = weak.upgrade() {
                     set_language(&app, &st, &l);
+                }
+            });
+        }
+
+        // ---- EQ (Phase 8.3) -------------------------------------------
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_set_eq_enabled(move |on| {
+                if let Some(app) = weak.upgrade() {
+                    set_eq_enabled(&app, &st, on);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_band_param_changed(move |band, param, value| {
+                if let Some(app) = weak.upgrade() {
+                    band_param_changed(&app, &st, band, param, f64::from(value) as f32);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_band_toggled(move |band| {
+                if let Some(app) = weak.upgrade() {
+                    band_toggled(&app, &st, band);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_eq_preset_chosen(move |idx| {
+                if let Some(app) = weak.upgrade() {
+                    eq_preset_chosen(&app, &st, idx);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_reset_eq(move || {
+                if let Some(app) = weak.upgrade() {
+                    reset_eq(&app, &st);
                 }
             });
         }
@@ -975,6 +1023,157 @@ fn push_all_params(app: &crate::AppWindow, state: &State) {
     app.invoke_set_pitch_field(format::pitch_field_text(p.pitch_semitones).into());
     app.invoke_set_air_field(format::air_field_text(p.air_percent).into());
     app.invoke_set_tract_field(format::tract_field_text(p.tract_mm).into());
+    push_eq(app, state, &p.eq);
+}
+
+// ---- EQ (Phase 8.3) -------------------------------------------------------
+
+/// Publish the whole EQ state: band model, canonical texts, response
+/// curve path commands (RBJ math from mvl-core), master flags and the
+/// active-preset index (0 = Flat unless the params match another preset).
+fn push_eq(app: &crate::AppWindow, state: &State, eq: &EqParams) {
+    let rate = state.inner.borrow().preview_rate();
+    let eq = eq.sanitized();
+
+    let mut bands: Vec<crate::EqBandUi> = Vec::with_capacity(4);
+    for (i, band) in eq.bands().iter().enumerate() {
+        bands.push(crate::EqBandUi {
+            kind: i as i32,
+            freq: band.freq,
+            q: band.q,
+            gain: band.gain_db,
+            freq_text: format::eq_freq_text(band.freq).into(),
+            q_text: format::eq_q_text(band.q).into(),
+            gain_text: format::eq_gain_text(band.gain_db).into(),
+            enabled: band.enabled,
+            neutral_freq: DEFAULT_BAND_FREQS[i],
+        });
+    }
+    app.set_eq_bands(slint::ModelRc::new(slint::VecModel::from(bands)));
+
+    let (line, fill) = eq_curve_paths(&eq, rate);
+    app.set_eq_curve_line(line.into());
+    app.set_eq_curve_fill(fill.into());
+    app.set_eq_enabled(eq.enabled);
+    app.set_eq_active(eq.is_active());
+    app.set_eq_preset_index(matching_preset_index(&eq));
+}
+
+/// SVG-ish path commands for the response curve in the 1000×260 curve
+/// viewbox: ±26 dB full scale (5 px/dB) around the midline y = 130.
+/// Returns (open line path, closed area path for the fill).
+fn eq_curve_paths(eq: &EqParams, rate: u32) -> (String, String) {
+    const W: f64 = 1000.0;
+    const H: f64 = 260.0;
+    const MID: f64 = H / 2.0;
+    const PX_PER_DB: f64 = 5.0;
+
+    let curve = response_curve_db(eq, rate, EQ_CURVE_POINTS);
+    let n = curve.len();
+    let mut line = String::with_capacity(n * 14);
+    let mut fill = String::with_capacity(n * 14 + 24);
+    for (i, db) in curve.iter().enumerate() {
+        let x = W * i as f64 / (n - 1) as f64;
+        let y = (MID - PX_PER_DB * db.clamp(-26.0, 26.0)).clamp(0.0, H);
+        if i == 0 {
+            line.push_str(&format!("M {x:.1} {y:.1}"));
+            fill.push_str(&format!("M 0 {H} L {x:.1} {y:.1}"));
+        } else {
+            line.push_str(&format!(" L {x:.1} {y:.1}"));
+            fill.push_str(&format!(" L {x:.1} {y:.1}"));
+        }
+    }
+    fill.push_str(&format!(" L {W} {H} Z"));
+    (line, fill)
+}
+
+/// Which preset (display index) the params currently equal, if any —
+/// drives the ComboBox highlight. Custom curves match nothing; the
+/// neutral set maps to index 0 (Flat).
+fn matching_preset_index(eq: &EqParams) -> i32 {
+    EQ_PRESETS
+        .iter()
+        .position(|p| p.params().sanitized() == *eq)
+        .map_or(0, |i| i as i32)
+}
+
+fn set_eq_enabled(app: &crate::AppWindow, state: &State, on: bool) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        inner.params.eq.enabled = on;
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
+/// param: 0 = frequency, 1 = Q, 2 = gain. The canonical value is
+/// re-sanitized and pushed back, so knob flicks can never leave the
+/// documented ranges in the model.
+fn band_param_changed(app: &crate::AppWindow, state: &State, band: i32, param: i32, value: f32) {
+    let i = band.clamp(0, 3) as usize;
+    {
+        let mut inner = state.inner.borrow_mut();
+        let mut eq = inner.params.eq;
+        let mut b = eq.band(i);
+        match param.clamp(0, 2) {
+            0 => b.freq = value,
+            1 => b.q = value,
+            _ => b.gain_db = value,
+        }
+        eq.set_band(i, b);
+        inner.params.eq = eq.sanitized();
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
+fn band_toggled(app: &crate::AppWindow, state: &State, band: i32) {
+    let i = band.clamp(0, 3) as usize;
+    {
+        let mut inner = state.inner.borrow_mut();
+        let mut eq = inner.params.eq;
+        let mut b = eq.band(i);
+        b.enabled = !b.enabled;
+        eq.set_band(i, b);
+        inner.params.eq = eq;
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
+fn eq_preset_chosen(app: &crate::AppWindow, state: &State, idx: i32) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        if let Some(preset) = EQ_PRESETS.get(usize::try_from(idx).unwrap_or(0)) {
+            inner.params.eq = preset.params();
+            let params = inner.params;
+            if let Some(p) = &inner.player {
+                let _ = p.set_params(params);
+            }
+        }
+    }
+    push_all_params(app, state);
+}
+
+fn reset_eq(app: &crate::AppWindow, state: &State) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        inner.params.eq = EqParams::neutral();
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
 }
 
 // ---- language -------------------------------------------------------------

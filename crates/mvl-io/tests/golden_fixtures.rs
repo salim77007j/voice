@@ -166,6 +166,7 @@ fn sample_renders() -> Vec<(&'static str, String, Vec<f32>, VocalParams)> {
                 pitch_semitones: 5.0,
                 tract_mm: 130.0,
                 air_percent: -40,
+                ..VocalParams::neutral()
             },
         ),
     ]

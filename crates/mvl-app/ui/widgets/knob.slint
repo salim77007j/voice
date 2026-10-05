@@ -9,6 +9,12 @@
 //   · arrow keys step by `step`, Shift+arrows by `coarse-step`
 //   · Home jumps to neutral, End to maximum, double-click resets
 //
+// Phase 8.3: `logarithmic` maps the sweep through log-frequency (EQ
+// frequency + Q knobs) — drag/wheel/keys all move in fraction space, so
+// a linear knob behaves exactly as before and a log knob sweeps its
+// decades evenly. `step` stays in VALUE units (converted to a fraction
+// of the range internally).
+//
 // The knob never emits unclamped values and never mutates on its own:
 // like PrecisionSlider it proposes candidates through `changed(float)`
 // and the Rust controller remains the single source of truth.
@@ -25,20 +31,36 @@ export component Knob inherits Rectangle {
     in property <float> coarse-step;
     in property <length> size: 54px;
     in property <color> accent: Theme.accent;
+    in property <bool> logarithmic: false;   // log sweep (EQ freq/Q)
+    in property <bool> enabled: true;        // greyed + inert when false
     callback changed(float);
     callback reset-pressed();
 
     // ---- derived --------------------------------------------------------
-    out property <float> fraction: (root.value - root.minimum) / (root.maximum - root.minimum);
+    // fraction of the sweep 0..1, log-mapped when `logarithmic`.
+    // (Slint's Math.log takes an explicit base — any base works here as
+    // long as both sides use the same one.)
+    out property <float> fraction: root.logarithmic
+        ? Math.log(root.value / root.minimum, 10) / Math.log(root.maximum / root.minimum, 10)
+        : (root.value - root.minimum) / (root.maximum - root.minimum);
     property <bool> on-neutral: Math.abs(root.value - root.neutral) < 0.000001;
     property <angle> ang: -135deg + 270deg * root.fraction;
     // pixels of vertical drag for the full range
     property <float> drag-range: 150;
     property <length> drag-last-y: 0px;
     property <bool> fine-drag: false;   // Shift held when the drag started
+    // one `step` expressed in fraction units (linear step → fraction)
+    property <float> step-fraction: root.step / (root.maximum - root.minimum);
+    property <float> coarse-fraction: root.coarse-step / (root.maximum - root.minimum);
 
     width: root.size;
     height: root.size;
+
+    function value-from-fraction(f: float) -> float {
+        return root.logarithmic
+            ? root.minimum * Math.pow(root.maximum / root.minimum, f)
+            : root.minimum + (root.maximum - root.minimum) * f;
+    }
 
     // ---- tick ring (behind the body) ------------------------------------
     // seven ticks over the 270° sweep, rotated the same way as the
@@ -136,12 +158,13 @@ export component Knob inherits Rectangle {
     // ---- interaction ----------------------------------------------------------
     fs := FocusScope {
         width: 100%; height: 100%;
+        enabled: root.enabled;
         key-pressed(ev) => {
             if (ev.text == Key.LeftArrow || ev.text == Key.DownArrow) {
-                root.changed(clamp-value(root.value - (ev.modifiers.shift ? root.coarse-step : root.step)));
+                root.propose(root.fraction - (ev.modifiers.shift ? root.coarse-fraction : root.step-fraction));
                 return accept;
             } else if (ev.text == Key.RightArrow || ev.text == Key.UpArrow) {
-                root.changed(clamp-value(root.value + (ev.modifiers.shift ? root.coarse-step : root.step)));
+                root.propose(root.fraction + (ev.modifiers.shift ? root.coarse-fraction : root.step-fraction));
                 return accept;
             } else if (ev.text == Key.Home) {
                 root.changed(root.neutral);
@@ -156,6 +179,7 @@ export component Knob inherits Rectangle {
 
     ta := TouchArea {
         width: 100%; height: 100%;
+        enabled: root.enabled;
         clicked => { fs.focus(); }
         double-clicked => { root.reset-pressed(); }
         pointer-event(ev) => {
@@ -171,13 +195,12 @@ export component Knob inherits Rectangle {
                 // pixels moved upward since the previous event (length → float)
                 let dy = (root.drag-last-y - self.mouse-y) / 1px;
                 root.drag-last-y = self.mouse-y;
-                let scale = (root.maximum - root.minimum) / root.drag-range
-                    * (root.fine-drag ? 0.125 : 1.0);
-                root.changed(clamp-value(root.value + dy * scale));
+                let rate = (1.0 / root.drag-range) * (root.fine-drag ? 0.125 : 1.0);
+                root.propose(root.fraction + dy * rate);
             }
         }
         scroll-event(ev) => {
-            root.changed(clamp-value(root.value + (ev.delta-y > 0 ? 1 : -1) * root.step));
+            root.propose(root.fraction + (ev.delta-y > 0 ? 1 : -1) * root.step-fraction);
             return accept;
         }
         accessible-role: AccessibleRole.slider;
@@ -194,7 +217,22 @@ export component Knob inherits Rectangle {
         opacity: fs.has-focus ? 0.9 : 0.0;
     }
 
+    // body dimming when disabled (after the focus ring so it tints all)
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: self.width / 2;
+        background: #1A1D21;
+        opacity: root.enabled ? 0.0 : 0.35;
+    }
+
     function clamp-value(v: float) -> float {
         return Math.min(root.maximum, Math.max(root.minimum, v));
+    }
+
+    // propose a new sweep fraction: clamps, converts back to value units
+    // (log-mapped when logarithmic) and emits through `changed`.
+    function propose(f: float) {
+        let fc = Math.min(1.0, Math.max(0.0, f));
+        root.changed(clamp-value(root.value-from-fraction(fc)));
     }
 }

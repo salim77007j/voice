@@ -186,6 +186,7 @@ fn screenshot_renders_real_pixels_en_and_ar() {
             pitch_semitones: 3.0,
             air_percent: -30,
             tract_mm: 140.0,
+            ..VocalParams::neutral()
         });
         let app = c.window();
         app.set_playhead(0.4);

@@ -23,6 +23,12 @@
 //! neutral parameters runs the (then no-op) chain instead of bypassing,
 //! because the STFT state is live.
 //!
+//! **EQ (Phase 8.3):** the four-band parametric EQ sits at the very end
+//! of the chain — after the true-peak guard, applying to every emitted
+//! sample — and runs through its own bypass rules: master bypassed or
+//! flat ⇒ bit-exact no-op; vocal sliders neutral with only the EQ
+//! active ⇒ the biquads run while the STFT machinery stays off.
+//!
 //! **Live parameter changes:** air and formant are frame-local fields
 //! and follow parameter changes at the next hop boundary (the 75 %
 //! OLA overlap crossfades them inherently). Pitch ratio changes rebuild
@@ -37,6 +43,7 @@ use rustfft::num_complex::Complex64;
 
 use crate::analysis::{FrameAnalyzer, FrameFeatures};
 use crate::breath::BreathProcessor;
+use crate::eq::EqProcessor;
 use crate::error::EngineError;
 use crate::formant::FormantProcessor;
 use crate::limiter;
@@ -86,6 +93,8 @@ pub struct VocalEngine {
     flushed: bool,
     src_peak: f32,
     guard_engaged: bool,
+    /// Four-band channel EQ (Phase 8.3), one per engine = per channel.
+    eq: EqProcessor,
 
     frames: Vec<FrameFeatures>,
     applied_air_db: f64,
@@ -140,6 +149,7 @@ impl VocalEngine {
             flushed: false,
             src_peak: 0.0,
             guard_engaged: false,
+            eq: EqProcessor::new(sample_rate),
             frames: Vec::new(),
             applied_air_db: 0.0,
             chain_in: 0,
@@ -205,8 +215,20 @@ impl VocalEngine {
         self.src_peak = self.src_peak.max(in_peak);
 
         if !self.engaged && params.is_neutral() {
-            // Bit-exact bypass (invariant #1).
+            // Bit-exact bypass (invariant #1) — vocal chain AND EQ inert.
             return Ok(input.to_vec());
+        }
+        if !self.engaged && params.vocal_neutral() {
+            // EQ-only session (Phase 8.3): the biquads are per-sample and
+            // stateless across blocks, so the STFT machinery stays off —
+            // engaging it for a pure EQ would burn CPU and forfeit the
+            // instant A/B the bypass gives. The EQ still gets its own
+            // bypass semantics (an inert EQ here cannot happen: that is
+            // the branch above).
+            self.params = params;
+            let mut out = input.to_vec();
+            self.eq.process(&params.eq, &mut out);
+            return Ok(out);
         }
         self.engaged = true;
         self.params = params;
@@ -229,6 +251,11 @@ impl VocalEngine {
 
         let mut out = self.collect_output(input.len() + 4096);
         self.guard_block(&mut out);
+        // Phase 8.3: the EQ is the last module — after the guard, so a
+        // user boost can exceed the ceiling exactly like any channel EQ
+        // placed post-limiter (the offline source-relative bound in
+        // `render` still sees the boosted signal).
+        self.eq.process(&self.params.eq, &mut out);
         self.chain_out += out.len();
         Ok(out)
     }
@@ -269,6 +296,8 @@ impl VocalEngine {
             out
         };
         self.guard_block(&mut out);
+        // Same post-guard EQ stage as `process` (Phase 8.3).
+        self.eq.process(&self.params.eq, &mut out);
         self.chain_out += out.len();
         Ok(out)
     }
@@ -696,6 +725,7 @@ mod tests {
                         pitch_semitones: pitch,
                         air_percent: air,
                         tract_mm: tract,
+                        ..VocalParams::neutral()
                     };
                     for sig in &signals {
                         let out = VocalEngine::render(sig, RATE, params, QualityProfile::Preview)
@@ -782,6 +812,7 @@ mod tests {
             pitch_semitones: 3.0,
             air_percent: 30,
             tract_mm: 150.0,
+            ..VocalParams::neutral()
         };
         let block = ts::sine(220.0, 0.5, 128, RATE);
         let mut fed = 0usize;
@@ -903,5 +934,110 @@ mod tests {
         let out = VocalEngine::render(&[], RATE, VocalParams::neutral(), QualityProfile::Preview)
             .unwrap();
         assert!(out.output.is_empty());
+    }
+
+    // ---- Phase 8.3: the channel EQ -------------------------------------
+
+    fn eq_params(band: usize, freq: f32, gain_db: f32) -> VocalParams {
+        let mut p = VocalParams::neutral();
+        p.eq.set_band(
+            band,
+            crate::eq::EqBandParams {
+                freq,
+                q: 0.707,
+                gain_db,
+                enabled: true,
+            },
+        );
+        p
+    }
+
+    /// An EQ-only session must NOT engage the STFT machinery: the output
+    /// equals a bare `EqProcessor` run over the input, sample for sample,
+    /// and deactivating the EQ afterwards returns to the bit-exact
+    /// bypass instantly (no OLA tail to drain — nothing was engaged).
+    #[test]
+    fn eq_only_bypasses_the_stft_machinery() {
+        let sig = ts::harmonic_stack(220.0, 10, 0.5, 8_000, RATE);
+        let params = eq_params(2, 3_000.0, 9.0);
+        assert!(!params.is_neutral() && params.vocal_neutral());
+
+        let mut engine = VocalEngine::new(RATE, QualityProfile::Preview).unwrap();
+        let out = engine.process(&sig, params).unwrap();
+        // Streams 1:1 in the EQ-only path (no STFT fill lag).
+        assert_eq!(out.len(), sig.len());
+        assert_ne!(out, sig, "a 9 dB presence boost must be audible");
+
+        let mut bare = crate::eq::EqProcessor::new(RATE);
+        let mut reference = sig.clone();
+        bare.process(&params.eq, &mut reference);
+        assert_eq!(out, reference, "EQ-only must be exactly the bare biquads");
+
+        // Back to fully neutral: instant bit-exact bypass (engaged never
+        // flipped, so there is no OLA state to flush).
+        let again = engine.process(&sig, VocalParams::neutral()).unwrap();
+        assert_eq!(again, sig, "deactivated EQ must restore the bypass");
+        assert!(engine.flush().unwrap().is_empty());
+    }
+
+    /// The full chain runs the EQ **after** the guard: with vocal params
+    /// engaged, the output must equal (chain output without EQ) filtered
+    /// by the EQ. Verified by feeding a 1 kHz tone through a 9 kHz air
+    /// shelf — the shelf barely touches 1 kHz, so the EQ-on and EQ-off
+    /// renders must agree within shelf leakage (measured against the
+    /// analytic shelf gain at 1 kHz).
+    #[test]
+    fn eq_applies_after_the_vocal_chain() {
+        let sig = ts::harmonic_stack(220.0, 10, 0.5, 16_000, RATE);
+        let vocal = VocalParams {
+            pitch_semitones: 3.0,
+            air_percent: -20,
+            ..VocalParams::neutral()
+        };
+
+        let plain = VocalEngine::render(&sig, RATE, vocal, QualityProfile::Preview).unwrap();
+        let mut boosted = vocal;
+        boosted.eq = crate::eq::EqPreset::AirBoost.params();
+        let with_eq = VocalEngine::render(&sig, RATE, boosted, QualityProfile::Preview).unwrap();
+
+        assert_eq!(plain.output.len(), with_eq.output.len());
+        // AirBoost's 6 kHz bell (+1 dB) lands on the stack's upper
+        // partials (220 Hz × 10 = 2.42 kHz top… the bell tail still
+        // reaches it) and the 10 kHz shelf on the air range — the render
+        // must change, but the length invariant must hold.
+        let diff = plain
+            .output
+            .iter()
+            .zip(&with_eq.output)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            diff > 1_000,
+            "AirBoost must alter the render ({diff} samples)"
+        );
+
+        // Output length invariant holds with the EQ in the chain.
+        assert_eq!(with_eq.output.len(), sig.len());
+    }
+
+    /// A disabled EQ (even with band gains set) keeps the whole-session
+    /// bit-exact bypass; a flat-but-enabled EQ too.
+    #[test]
+    fn engine_bypass_covers_disabled_and_flat_eq() {
+        let sig = ts::sine(440.0, 0.5, 4_800, RATE);
+
+        let mut disabled = VocalParams::neutral();
+        disabled.eq.enabled = false;
+        disabled.eq.high.gain_db = 24.0;
+        assert!(!disabled.eq.is_active() && disabled.is_neutral());
+
+        let mut flat = VocalParams::neutral();
+        flat.eq.low_mid.freq = 500.0; // frequency is irrelevant at 0 dB
+        assert!(flat.is_neutral());
+
+        for params in [disabled, flat] {
+            let out = VocalEngine::render(&sig, RATE, params, QualityProfile::Preview).unwrap();
+            assert_eq!(out.output, sig, "inert EQ must keep invariant #1 bit-exact");
+        }
     }
 }

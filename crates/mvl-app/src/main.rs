@@ -35,6 +35,7 @@ fn usage() {
              micro-vocal-lab [run] [FILE]      desktop UI (optionally loads FILE)\n\
              micro-vocal-lab process IN OUT [--pitch ST] [--air %] [--tract MM] [--profile preview|render]\n\
              micro-vocal-lab screenshot OUT.png [FILE] [--pitch ST] [--air %] [--tract MM]\n\
+                                            [--eq-preset flat|vocal|demud|air|deharsh]\n\
                                             [--locale en|ar] [--width PX] [--height PX] [--playhead SEC]\n\
              micro-vocal-lab selftest [--seconds N] [DIR]\n\
              micro-vocal-lab self-check",
@@ -80,7 +81,7 @@ fn screenshot_command(args: &[String]) {
     let mut params = VocalParams::neutral();
     let mut locale = "en".to_string();
     let mut width = 1280u32;
-    let mut height = 800u32;
+    let mut height = 856u32;
     let mut playhead: Option<f64> = None;
 
     let mut i = 0;
@@ -134,6 +135,27 @@ fn screenshot_command(args: &[String]) {
             "--playhead" => {
                 i += 1;
                 playhead = args.get(i).and_then(|v| v.parse().ok());
+            }
+            "--eq-preset" => {
+                i += 1;
+                let name = args.get(i).map(String::as_str).unwrap_or_else(|| {
+                    eprintln!("error: --eq-preset needs a name (flat|vocal|demud|air|deharsh)");
+                    std::process::exit(2);
+                });
+                params.eq = match name {
+                    "flat" | "Flat" => mvl_core::eq::EqPreset::Flat,
+                    "vocal" | "presence" | "Vocal Presence" => {
+                        mvl_core::eq::EqPreset::VocalPresence
+                    }
+                    "demud" | "de-mud" | "De-Mud" => mvl_core::eq::EqPreset::DeMud,
+                    "air" | "airboost" | "Air Boost" => mvl_core::eq::EqPreset::AirBoost,
+                    "deharsh" | "de-harsh" | "De-Harsh" => mvl_core::eq::EqPreset::DeHarsh,
+                    other => {
+                        eprintln!("error: unknown EQ preset '{other}'");
+                        std::process::exit(2);
+                    }
+                }
+                .params();
             }
             other if output.is_none() && other.ends_with(".png") => {
                 output = Some(other.to_string())
@@ -272,6 +294,7 @@ fn engine_self_check() -> String {
             pitch_semitones: 7.0,
             air_percent: -30,
             tract_mm: 160.0,
+            ..VocalParams::neutral()
         },
         QualityProfile::Preview,
     ) {

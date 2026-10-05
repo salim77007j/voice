@@ -134,6 +134,29 @@ pub fn tract_field_text(tract_mm: f32) -> String {
     format!("{tract_mm:.0}")
 }
 
+/// Canonical text for an EQ frequency readout: Hz under 1 kHz, kHz above
+/// (Western digits and mono units per the localization conventions, §8.6).
+#[must_use]
+pub fn eq_freq_text(freq: f32) -> String {
+    if freq.abs() >= 1000.0 {
+        format!("{:.2} kHz", freq / 1000.0)
+    } else {
+        format!("{freq:.0} Hz")
+    }
+}
+
+/// Canonical text for an EQ Q readout.
+#[must_use]
+pub fn eq_q_text(q: f32) -> String {
+    format!("{q:.2}")
+}
+
+/// Canonical text for an EQ gain readout: signed dB, 1 decimal.
+#[must_use]
+pub fn eq_gain_text(gain_db: f32) -> String {
+    format!("{gain_db:+.1} dB")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +240,17 @@ mod tests {
         assert_eq!(pitch_field_text(-0.07), "-0.07");
         assert_eq!(tract_field_text(170.0), "170");
         assert_eq!(air_field_text(-30), "-12.0");
+    }
+
+    #[test]
+    fn eq_texts_are_canonical() {
+        assert_eq!(eq_freq_text(100.0), "100 Hz");
+        assert_eq!(eq_freq_text(350.4), "350 Hz");
+        assert_eq!(eq_freq_text(3_000.0), "3.00 kHz");
+        assert_eq!(eq_freq_text(20_000.0), "20.00 kHz");
+        assert_eq!(eq_q_text(0.707), "0.71");
+        assert_eq!(eq_gain_text(2.5), "+2.5 dB");
+        assert_eq!(eq_gain_text(-3.0), "-3.0 dB");
+        assert_eq!(eq_gain_text(0.0), "+0.0 dB");
     }
 }

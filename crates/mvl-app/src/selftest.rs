@@ -42,6 +42,7 @@ fn selftest_params() -> VocalParams {
         pitch_semitones: 3.0,
         air_percent: -30,
         tract_mm: 140.0,
+        ..VocalParams::neutral()
     }
 }
 

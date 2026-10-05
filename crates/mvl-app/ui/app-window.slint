@@ -26,6 +26,8 @@ import { TextButton, IconButtonBase } from "widgets/buttons.slint";
 import { ComboBox } from "std-widgets.slint";
 import { WaveformView, RulerTick } from "widgets/waveform-view.slint";
 import { ModuleCard } from "widgets/module-card.slint";
+import { EqPanel, EqBandUi } from "widgets/eq-panel.slint";
+export { EqBandUi }
 import { RackPanel, ScrewHead, LedDot, EngravedLabel } from "widgets/rack.slint";
 import { SpectrumView } from "widgets/spectrum-view.slint";
 import { LevelMeter } from "widgets/level-meter.slint";
@@ -46,9 +48,9 @@ export component AppWindow inherits Window {
     title: @tr("Micro Vocal Lab");
     background: Theme.bg-base;
     min-width: 1080px;
-    min-height: 680px;
+    min-height: 856px;
     preferred-width: 1440px;
-    preferred-height: 900px;
+    preferred-height: 1086px;
 
     // ================= state published by the Rust controller ============
 
@@ -120,6 +122,16 @@ export component AppWindow inherits Window {
     in-out property <float> level-peak-r: 0;
     in-out property <bool> clip-latch: false;
 
+    // parametric EQ (Phase 8.3): canonical state lives in the Rust
+    // controller; the curve path strings are RBJ response math, computed
+    // in Rust and handed over as SVG-ish path commands (viewbox 1000×260)
+    in-out property <bool> eq-enabled: true;
+    in-out property <bool> eq-active: false;
+    in-out property <[EqBandUi]> eq-bands;
+    in-out property <string> eq-curve-line: "";
+    in-out property <string> eq-curve-fill: "";
+    in-out property <int> eq-preset-index: 0;
+
     // ================= actions back into the controller ==================
 
     callback new-recording-clicked();
@@ -147,6 +159,11 @@ export component AppWindow inherits Window {
     callback close-devices-clicked();
     callback set-input-device(string);
     callback set-output-device(string);
+    callback set-eq-enabled(bool);
+    callback band-param-changed(int, int, float);   // band, param, value
+    callback band-toggled(int);
+    callback eq-preset-chosen(int);
+    callback reset-eq();
 
     // ================= layout ============================================
 
@@ -317,6 +334,23 @@ export component AppWindow inherits Window {
                     canvas-resized() => { root.canvas-resized(); }
                 }
             }
+        }
+
+        // ---- EQ rack: 4-band parametric equalizer (Phase 8.3) -------------
+        EqPanel {
+            height: 196px;
+            has-audio: root.has-audio;
+            eq-enabled: root.eq-enabled;
+            eq-active: root.eq-active;
+            bands: root.eq-bands;
+            curve-line: root.eq-curve-line;
+            curve-fill: root.eq-curve-fill;
+            preset-index <=> root.eq-preset-index;
+            set-eq-enabled(on) => { root.set-eq-enabled(on); }
+            band-param-changed(b, p, v) => { root.band-param-changed(b, p, v); }
+            band-toggled(b) => { root.band-toggled(b); }
+            preset-chosen(i) => { root.eq-preset-chosen(i); }
+            reset-eq() => { root.reset-eq(); }
         }
 
         // ---- main row: channel strips + analysis rack ----------------------
