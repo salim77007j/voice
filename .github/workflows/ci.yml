@@ -15,6 +15,13 @@
 #              after lint+test pass. Linux artifacts are built on 22.04 to
 #              ship the older glibc (2.35) baseline.
 #
+# Caching: every job that compiles Rust restores via Swatinem/rust-cache@v2.
+# Per-job `key` inputs (lint/test/release) keep profile-specific target
+# directories from thrashing each other: release builds populate
+# target/release, lint/test populate target/debug. rust-cache already
+# partitions by runner OS + rustc version, so the 5-OS test matrix legs
+# share the `test` key safely.
+#
 # macOS artifacts are unsigned (documented constraint, §11): Gatekeeper
 # needs `xattr -cr <app>` or right-click-open on first run.
 
@@ -45,6 +52,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
       - name: Install ALSA + fontconfig dev packages
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
       - name: cargo fmt --check
@@ -69,6 +78,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
       - name: Install ALSA + fontconfig dev packages
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
@@ -111,6 +122,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
       - name: Install ALSA + fontconfig dev packages
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev
