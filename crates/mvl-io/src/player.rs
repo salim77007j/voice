@@ -869,17 +869,29 @@ mod tests {
     }
 
     /// Phase 8.2 end-to-end: feeder thread + ring + sink pumped by a
-    /// simulated paced device (10 ms blocks, 21 ms host-reported latency).
-    /// The reported playhead must match the *audible* audio position —
-    /// wall time since play minus device latency — within 5 ms at every
-    /// probe. This is the acceptance test for the user-reported bug
-    /// "sound does not match the visual playhead".
+    /// *physically consistent* simulated device. The device pipeline
+    /// (modelled queue, seeded with 21 ms of pre-roll like a real DAC
+    /// chain) drains in real time; every callback reports its actual
+    /// pre-block queue depth as the callback→audible latency — exactly
+    /// what ALSA delay / WASAPI padding / CoreAudio report via cpal. The
+    /// reported playhead must match the sim's own audible truth (handed
+    /// content − pipeline occupancy) within 5 ms at every probe.
+    ///
+    /// The schedule deliberately stresses the two regimes that made the
+    /// first version of this test flaky on loaded CI runners (macOS legs,
+    /// Phase 8.2 follow-up): a **catch-up burst** (probes 12–14 fire 1 ms
+    /// apart — pipeline fills, reported latency grows) and a **pipeline
+    /// drain** (probes 25–27 fire 30 ms apart — queue runs dry, latency
+    /// collapses to 0, underrun silence is handed). Absolute targets keep
+    /// a descheduled probe from shifting the whole timeline. Both models
+    /// (player anchor vs sim queue) advance in real time between events,
+    /// so the comparison is exact under any scheduling, not just the
+    /// ideal 10 ms cadence.
     #[test]
     fn e2e_playhead_matches_audible_audio_within_5ms() {
         const RATE: u32 = 48_000;
         const BLOCK: usize = 480; // 10 ms
-        const LATENCY: Duration = Duration::from_millis(21);
-        const PROBES: usize = 40; // 0.4 s of playback
+        const PROBES: usize = 40;
 
         let audio = tone_audio(RATE as usize * 5, RATE); // 5 s
         let shared = Shared::new();
@@ -893,43 +905,83 @@ mod tests {
         spawn_feeder(producer, cmd_rx, Arc::clone(&shared), Arc::new(audio));
         let mut sink = SinkLogic::new(consumer, Arc::clone(&shared));
 
-        // Simulated device: sleep to the block schedule, then pull.
-        let t0 = std::time::Instant::now();
         cmd_tx.send(PlayerCommand::Play).unwrap();
         // Feeder polls at 2 ms; give it a beat so play is registered
         // (the audible timeline starts at the first real callback).
         std::thread::sleep(Duration::from_millis(5));
-        let mut first_callback_at: Option<std::time::Instant> = None;
 
-        for i in 0..PROBES {
-            let target = t0 + Duration::from_millis(5 + (i as u64 + 1) * 10);
+        // Deterministic probe schedule (ms offsets from start): steady
+        // 10 ms cadence, a 3-probe burst, and a pipeline-draining stretch.
+        let offsets_ms: Vec<u64> = (0..PROBES)
+            .scan(5u64, |ms, i| {
+                *ms += match i {
+                    12..=14 => 1,
+                    25..=27 => 30,
+                    _ => 10,
+                };
+                Some(*ms)
+            })
+            .collect();
+
+        // Simulated device state: frames handed to the device but not yet
+        // audible. Seeded with 21 ms of pre-roll silence (real devices
+        // play silence while the pipeline fills; the player must subtract
+        // it — a zero-latency sim would make the compensation vacuous).
+        let mut queue_frames: f64 = 21.0 * f64::from(RATE);
+        let mut queue_at = std::time::Instant::now();
+        let t0 = queue_at;
+        let mut total_popped: u64 = 0;
+
+        for (i, &off) in offsets_ms.iter().enumerate() {
+            let target = t0 + Duration::from_millis(off);
             let now = std::time::Instant::now();
             if target > now {
                 std::thread::sleep(target - now);
             }
-            let mut buf = [0.0f32; BLOCK];
             let at = std::time::Instant::now();
-            first_callback_at.get_or_insert(at);
-            sink.fill(&mut buf, at, Some(LATENCY));
 
-            // Expected audible position: audio time = wall time since the
-            // first callback, minus the device latency. For the first
-            // LATENCY the device pipeline is filling and nothing is
-            // audible yet — the playhead legitimately clamps at 0 there
-            // (no audio to match), so only assert once audio is live.
-            let t1 = first_callback_at.unwrap();
-            let expected = at.saturating_duration_since(t1).as_secs_f64() - 0.021;
-            if expected <= 0.0 {
-                continue;
-            }
+            // Drain the device pipeline up to the callback instant.
+            let elapsed = at.saturating_duration_since(queue_at).as_secs_f64();
+            queue_frames = (queue_frames - elapsed * f64::from(RATE)).max(0.0);
+            queue_at = at;
+            let queue_before = queue_frames;
+
+            // Hand one block; the device reports its pre-block queue
+            // depth as the callback→audible latency (cpal semantics).
+            let mut buf = [0.0f32; BLOCK];
+            let latency = Duration::from_secs_f64(queue_before / f64::from(RATE));
+            sink.fill(&mut buf, at, Some(latency));
+
+            // The sink pops what the ring had (≤ BLOCK, 0 on underrun);
+            // the shared handed counter is the single source of truth.
+            let popped = shared.consumed.load(Ordering::Acquire) - total_popped;
+            total_popped += popped;
+            queue_frames = queue_before + popped as f64;
+
+            // Sim-truth audible position right now: everything handed
+            // minus what is still inside the pipeline (floor 0 = the
+            // pre-roll silence window at the very start).
+            let now2 = std::time::Instant::now();
+            let elapsed2 = now2.saturating_duration_since(queue_at).as_secs_f64();
+            let q_now = (queue_frames - elapsed2 * f64::from(RATE)).max(0.0);
+            let audible_s = ((total_popped as f64 - q_now) / f64::from(RATE)).max(0.0);
+
             let reported = shared.position_seconds();
-            let err_ms = (reported - expected) * 1000.0;
+            let err_ms = (reported - audible_s) * 1000.0;
             assert!(
                 err_ms.abs() < 5.0,
-                "probe {i}: reported {reported:.4}s vs expected audible {expected:.4}s \
+                "probe {i}: reported {reported:.4}s vs sim audible {audible_s:.4}s \
                  (|err| = {err_ms:.2} ms, must be < 5 ms)"
             );
         }
+
+        // Sanity: the run must have actually handed audio (an all-underrun
+        // degenerate loop would pass vacuously with both models at 0).
+        let scheduled = PROBES as u64 * BLOCK as u64;
+        assert!(
+            total_popped * 2 >= scheduled,
+            "simulated device handed only {total_popped}/{scheduled} frames — feeder starved?"
+        );
     }
 
     /// Phase 8.2: after a 44.1 kHz → 48 kHz device adaptation the
@@ -948,9 +1000,12 @@ mod tests {
         shared.playing.store(true, Ordering::Release);
 
         // Hand one second in 10 ms callbacks, pacing them in real time so
-        // the extrapolation has honest wall-clock anchors.
+        // the extrapolation has honest wall-clock anchors. `last_at` is
+        // recorded so the assertion can cancel sleep-overshoot drift on
+        // loaded CI machines.
         let t0 = std::time::Instant::now();
         let lat = Duration::from_millis(15);
+        let mut last_at = t0;
         for i in 0..100 {
             let target = t0 + Duration::from_millis((i + 1) * 10);
             let now = std::time::Instant::now();
@@ -959,15 +1014,20 @@ mod tests {
             }
             producer.push_entire_slice(&[0.25f32; 480]).unwrap();
             let mut buf = [0.0f32; 480];
-            sink.fill(&mut buf, std::time::Instant::now(), Some(lat));
+            last_at = std::time::Instant::now();
+            sink.fill(&mut buf, last_at, Some(lat));
         }
+        let read_at = std::time::Instant::now();
         let pos = shared.position_seconds();
         // Handed 1.0 s; the last anchor sits one block back with 15 ms of
-        // device latency in front of it → 1.0 − 0.010 − 0.015 = 0.975 s.
-        // (A frames-vs-device-rate mismatch would show ≈ 1.088 or 0.919.)
-        let expected = 1.0 - 0.010 - 0.015;
+        // device latency in front of it → 1.0 − 0.010 − 0.015 = 0.975 s,
+        // plus whatever wall time elapsed since that last callback
+        // (cancelling CI scheduling jitter). A frames-vs-device-rate
+        // mismatch would still show ≈ 1.088 or 0.919.
+        let since_last = read_at.saturating_duration_since(last_at).as_secs_f64();
+        let expected = 1.0 - 0.010 - 0.015 + since_last;
         assert!(
-            (pos - expected).abs() < 0.02,
+            (pos - expected).abs() < 0.01,
             "44.1→48 adaptation must not skew the playhead: pos {pos} vs ~{expected}"
         );
     }
