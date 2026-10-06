@@ -12,6 +12,7 @@
 
 pub mod analysis;
 pub mod breath;
+pub mod compressor;
 pub mod engine;
 pub mod eq;
 pub mod error;
@@ -25,6 +26,10 @@ pub mod testsupport;
 
 pub use analysis::{ClassSmoother, FrameAnalyzer, FrameClass, FrameFeatures};
 pub use breath::{BreathEdit, BreathProcessor};
+pub use compressor::{
+    static_gain_db, transfer_pairs_db, CompPreset, CompressorParams, CompressorProcessor,
+    COMP_PRESETS,
+};
 pub use engine::{RenderResult, VocalEngine};
 pub use eq::{Biquad, EqBandKind, EqBandParams, EqParams, EqPreset, EqProcessor, EQ_PRESETS};
 pub use error::EngineError;

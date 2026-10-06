@@ -1,0 +1,531 @@
+// Broadband compressor panel (Phase 8.4): the second V2 rack module —
+// a real dynamics stage wired 1:1 to mvl-core's feed-forward
+// log-domain compressor, with an honest live gain-reduction meter.
+//
+// Anatomy (rack conventions, sibling of the EQ row):
+//
+//   ┌ header ─ LED · COMPRESSOR · [ON/BYPASS] · PRESET [ComboBox] · [Reset]
+//   ├ body ── [ transfer curve well (0…−80 dB, unity diagonal) ]
+//   │         [ GR meter well (0…−24 dB, live from engine telemetry) ]
+//   │         [ THRESHOLD ][ RATIO ][ ATTACK ][ RELEASE ][ KNEE ][ MAKEUP ][ MIX ]
+//
+// The transfer curve is the controller-computed static gain computer
+// (the same `static_gain_db` math the audio path runs); the GR meter is
+// engine telemetry, not a decoration. The wells keep an LTR dB axis in
+// RTL locales (engineering-graph convention — same decision as the EQ
+// response curve, the RTA and the timeline); the surrounding layout
+// mirrors like every other rack row. All data flows in from the
+// controller; the widget proposes changes through callbacks and never
+// fabricates values.
+
+import { Theme } from "../theme.slint";
+import { Translations } from "../translations.slint";
+import { TextButton } from "buttons.slint";
+import { Knob } from "knob.slint";
+import { LedDot, EngravedLabel } from "rack.slint";
+import { ComboBox } from "std-widgets.slint";
+
+// The whole compressor UI state, published by the controller (canonical
+// values + preformatted mono texts; the widget only displays/proposes).
+export struct CompUi {
+    threshold: float,
+    ratio: float,
+    attack: float,
+    release: float,
+    knee: float,
+    makeup: float,
+    mix: float,
+    thr-text: string,
+    ratio-text: string,
+    att-text: string,
+    rel-text: string,
+    knee-text: string,
+    makeup-text: string,
+    mix-text: string,
+    enabled: bool,
+}
+
+// param indices for `comp-param-changed` (must match the controller's
+// match arms — one knob, one index, one real DSP field).
+export global CompParam {
+    out property <int> threshold: 0;
+    out property <int> ratio: 1;
+    out property <int> attack: 2;
+    out property <int> release: 3;
+    out property <int> knee: 4;
+    out property <int> makeup: 5;
+    out property <int> mix: 6;
+}
+
+export component CompPanel inherits Rectangle {
+    // ---- contract (Rust-owned state) ------------------------------------
+    in property <bool> has-audio: false;
+    in property <CompUi> comp;
+    in property <bool> comp-active: false;     // params would process audio
+    in property <float> gr-db: 0.0;            // live meter, ≤ 0
+    in property <string> gr-text: "0.0 dB";    // preformatted meter value
+    in property <string> curve-line;           // static transfer, viewbox 260×260
+    in property <string> unity-line;           // 0 dB reference diagonal
+    in property <string> curve-fill;
+    in property <float> thr-x: 0.75;           // threshold rule, 0…1 of the well
+    in-out property <int> preset-index;
+
+    // translated preset labels (display order == CompPreset order in Rust)
+    property <[string]> preset-labels: [
+        @tr("Gentle"),
+        @tr("Vocal Control"),
+        @tr("Peak Tamer"),
+        @tr("Broadcast"),
+        @tr("NY Parallel"),
+    ];
+
+    callback set-comp-enabled(bool);
+    callback comp-param-changed(int, float);
+    callback comp-preset-chosen(int);
+    callback reset-comp();
+
+    // meter fill fraction: 24 dB full scale on the GR well
+    property <float> gr-frac: Math.min(1.0, Math.abs(root.gr-db) / 24.0);
+    property <bool> compressing: root.comp.enabled && root.gr-db < -0.05;
+
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-panel;
+
+    // bevel light
+    Rectangle {
+        x: 1px; y: 1px;
+        width: parent.width - 2px;
+        height: 1px;
+        background: #FFFFFF1E;
+    }
+
+    VerticalLayout {
+        padding: Theme.space-2;
+        padding-top: 6px;
+        spacing: 6px;
+
+        // ---- header ------------------------------------------------------
+        FlexboxLayout {
+            height: 26px;
+            flex-direction: Translations.rtl ? row-reverse : row;
+            alignment: LayoutAlignment.stretch;
+            spacing: Theme.space-2;
+
+            LedDot {
+                lit: root.comp.enabled && root.comp-active;
+                led-color: Theme.accent;
+                d: 8px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+            EngravedLabel {
+                text: @tr("COMPRESSOR");
+                font-size: 11px;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Rectangle { width: 6px; height: 1px; }
+
+            TextButton {
+                text: root.comp.enabled ? @tr("ON") : @tr("BYPASS");
+                tooltip: @tr("Bypass the whole compressor (bit-exact)");
+                active: root.comp.enabled;
+                min-w: 76px;
+                clicked => { root.set-comp-enabled(!root.comp.enabled); }
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+
+            Rectangle { height: 1px; horizontal-stretch: 1; }
+
+            Text {
+                text: @tr("Preset");
+                color: Theme.text-muted;
+                font-family: Theme.font-mono;
+                font-size: 10px;
+                vertical-alignment: TextVerticalAlignment.center;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+            ComboBox {
+                model: root.preset-labels;
+                current-index <=> root.preset-index;
+                selected => { root.comp-preset-chosen(self.current-index); }
+                min-width: 150px;
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+            TextButton {
+                text: @tr("Reset");
+                tooltip: @tr("Reset the compressor to neutral");
+                min-w: 64px;
+                clicked => { root.reset-comp(); }
+                cross-axis-self-alignment: CrossAxisAlignment.center;
+            }
+        }
+
+        // ---- body: transfer curve + GR meter + knob strip ------------------
+        FlexboxLayout {
+            vertical-stretch: 1;
+            flex-direction: Translations.rtl ? row-reverse : row;
+            alignment: LayoutAlignment.stretch;
+            cross-axis-alignment: CrossAxisAlignment.stretch;
+            spacing: Theme.space-2;
+
+            // transfer curve: recessed well, LTR dB axes always
+            Rectangle {
+                min-width: 200px;
+                horizontal-stretch: 1;
+                background: Theme.recess;
+                border-width: 1px;
+                border-color: #0D0F12;
+                border-radius: Theme.radius-control;
+
+                Rectangle {
+                    x: 1px; y: 1px;
+                    width: parent.width - 2px;
+                    height: 2px;
+                    background: #00000088;
+                }
+
+                // threshold rule (fraction of the −80…0 dB axis)
+                Rectangle {
+                    x: 4px + (parent.width - 8px) * Math.max(0.0, Math.min(1.0, root.thr-x));
+                    y: 4px;
+                    width: 1px;
+                    height: parent.height - 8px;
+                    background: #FFFFFF14;
+                }
+
+                // unity diagonal (0 dB reference)
+                Path {
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    x: 4px;
+                    y: 4px;
+                    viewbox-width: 260;
+                    viewbox-height: 260;
+                    fit: ImageFit.fill;
+                    commands: root.unity-line;
+                    stroke: #FFFFFF26;
+                    stroke-width: 1px;
+                }
+                // the static curve itself (controller-computed math)
+                Path {
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    x: 4px;
+                    y: 4px;
+                    viewbox-width: 260;
+                    viewbox-height: 260;
+                    fit: ImageFit.fill;
+                    commands: root.curve-fill;
+                    fill: root.comp.enabled && root.comp-active ? Theme.accent-soft : #FFFFFF08;
+                }
+                Path {
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    x: 4px;
+                    y: 4px;
+                    viewbox-width: 260;
+                    viewbox-height: 260;
+                    fit: ImageFit.fill;
+                    commands: root.curve-line;
+                    stroke: root.comp.enabled && root.comp-active ? Theme.accent : Theme.text-muted;
+                    stroke-width: 2px;
+                }
+
+                // axis captions (mono; 0 dB top-right, −80 bottom-left)
+                Text {
+                    text: "0 dB";
+                    x: parent.width - 34px; y: 2px;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 8px;
+                }
+                Text {
+                    text: "in −80";
+                    x: 4px;
+                    y: parent.height - 12px;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 8px;
+                }
+                Text {
+                    text: @tr("Transfer");
+                    x: 4px; y: 2px;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 8px;
+                }
+            }
+
+            // GR meter: recessed vertical well, fills downward as the
+            // engine reports deeper reduction (live telemetry)
+            Rectangle {
+                min-width: 64px;
+                max-width: 88px;
+                background: Theme.recess;
+                border-width: 1px;
+                border-color: #0D0F12;
+                border-radius: Theme.radius-control;
+
+                Rectangle {
+                    x: 1px; y: 1px;
+                    width: parent.width - 2px;
+                    height: 2px;
+                    background: #00000088;
+                }
+
+                // the fill grows from the top as |GR| deepens
+                Rectangle {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: (parent.height - 8px) * root.gr-frac;
+                    background: root.compressing ? Theme.accent-soft : #FFFFFF0A;
+                    border-radius: 2px;
+                }
+                // −12 dB mid rule
+                Rectangle {
+                    x: 4px;
+                    y: 4px + (parent.height - 8px) * 0.5;
+                    width: parent.width - 8px;
+                    height: 1px;
+                    background: #FFFFFF14;
+                }
+
+                Text {
+                    text: "GR";
+                    x: 4px; y: 2px;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 8px;
+                }
+                // the numeric meter value, from the engine via the controller
+                Text {
+                    text: root.gr-text;
+                    x: 4px;
+                    y: parent.height - 14px;
+                    color: root.compressing ? Theme.accent : Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 9px;
+                }
+            }
+
+            // knob strip: 7 real controls
+            VerticalLayout {
+                min-width: 380px;
+                horizontal-stretch: 2;
+                spacing: 2px;
+
+                FlexboxLayout {
+                    height: 50px;
+                    flex-direction: Translations.rtl ? row-reverse : row;
+                    alignment: LayoutAlignment.space-around;
+                    cross-axis-alignment: CrossAxisAlignment.center;
+
+                    Knob {
+                        size: 44px;
+                        value: root.comp.threshold;
+                        minimum: -60; maximum: 0;
+                        neutral: -20;
+                        step: 0.5; coarse-step: 6;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.threshold, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.ratio;
+                        minimum: 1; maximum: 20;
+                        neutral: 1;
+                        step: 0.1; coarse-step: 1;
+                        logarithmic: true;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.ratio, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.attack;
+                        minimum: 0.1; maximum: 200;
+                        neutral: 10;
+                        step: 0.1; coarse-step: 10;
+                        logarithmic: true;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.attack, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.release;
+                        minimum: 5; maximum: 2000;
+                        neutral: 120;
+                        step: 1; coarse-step: 100;
+                        logarithmic: true;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.release, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.knee;
+                        minimum: 0; maximum: 24;
+                        neutral: 6;
+                        step: 0.5; coarse-step: 3;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.knee, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.makeup;
+                        minimum: -24; maximum: 24;
+                        neutral: 0;
+                        step: 0.5; coarse-step: 3;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.makeup, v); }
+                    }
+                    Knob {
+                        size: 44px;
+                        value: root.comp.mix;
+                        minimum: 0; maximum: 100;
+                        neutral: 100;
+                        step: 1; coarse-step: 10;
+                        enabled: root.comp.enabled;
+                        changed(v) => { root.comp-param-changed(CompParam.mix, v); }
+                    }
+                }
+
+                // knob labels
+                FlexboxLayout {
+                    height: 12px;
+                    flex-direction: Translations.rtl ? row-reverse : row;
+                    alignment: LayoutAlignment.space-around;
+
+                    Text {
+                        text: @tr("Thresh");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Ratio");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Attack");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Release");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Knee");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Makeup");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Text {
+                        text: @tr("Mix");
+                        color: Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 8px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                }
+
+                // readout row: canonical texts, one per knob
+                FlexboxLayout {
+                    height: 14px;
+                    flex-direction: Translations.rtl ? row-reverse : row;
+                    alignment: LayoutAlignment.space-around;
+
+                    Text {
+                        text: root.comp.thr-text;
+                        color: root.comp.enabled ? Theme.text-2nd : Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.ratio-text;
+                        color: root.comp.enabled && root.comp.ratio > 1.0 ? Theme.accent : Theme.text-2nd;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.att-text;
+                        color: root.comp.enabled ? Theme.text-2nd : Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.rel-text;
+                        color: root.comp.enabled ? Theme.text-2nd : Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.knee-text;
+                        color: root.comp.enabled ? Theme.text-2nd : Theme.text-muted;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.makeup-text;
+                        color: root.comp.enabled && root.comp.makeup != 0.0 ? Theme.accent : Theme.text-2nd;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.comp.mix-text;
+                        color: root.comp.enabled && root.comp.mix < 100.0 ? Theme.accent : Theme.text-2nd;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                        overflow: elide;
+                    }
+                }
+
+                // live GR readout under the knobs (meter value + context)
+                Text {
+                    height: 16px;
+                    text: root.compressing
+                        ? @tr("Gain reduction") + "  " + root.gr-text
+                        : root.comp.enabled ? @tr("Idle — no reduction") : @tr("Bypassed");
+                    color: root.compressing ? Theme.accent : Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: 10px;
+                    horizontal-alignment: TextHorizontalAlignment.center;
+                    vertical-alignment: TextVerticalAlignment.center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}

@@ -17,6 +17,7 @@ pub const MIN_TRACT_MM: f32 = 100.0;
 /// Maximum selectable vocal-tract length (very large adult perception).
 pub const MAX_TRACT_MM: f32 = 260.0;
 
+use crate::compressor::CompressorParams;
 use crate::eq::EqParams;
 
 /// Pitch shift range in semitones (±1 octave).
@@ -52,6 +53,9 @@ pub struct VocalParams {
     /// Four-band parametric EQ (Phase 8.3), applied after the vocal
     /// chain's true-peak guard. Neutral/flat/disabled = bit-exact.
     pub eq: EqParams,
+    /// Broadband compressor (Phase 8.4), applied after the EQ — the last
+    /// module in the chain. Disabled/inert = bit-exact.
+    pub comp: CompressorParams,
 }
 
 impl VocalParams {
@@ -63,6 +67,7 @@ impl VocalParams {
             air_percent: 0,
             tract_mm: NEUTRAL_TRACT_MM,
             eq: EqParams::neutral(),
+            comp: CompressorParams::neutral(),
         }
     }
 
@@ -74,11 +79,11 @@ impl VocalParams {
     }
 
     /// True when this set equals [`VocalParams::neutral`] — vocal sliders
-    /// neutral **and** the EQ acoustically inert (master bypassed, or
-    /// every band bypassed/flat). The engine uses this to engage the
-    /// bit-exact bypass path.
+    /// neutral, the EQ acoustically inert (master bypassed, or every band
+    /// bypassed/flat) **and** the compressor inert (disabled, or nothing
+    /// to do). The engine uses this to engage the bit-exact bypass path.
     pub fn is_neutral(&self) -> bool {
-        self.vocal_neutral() && !self.eq.is_active()
+        self.vocal_neutral() && !self.eq.is_active() && !self.comp.is_active()
     }
 
     /// Return a copy with every field clamped into its documented range.
@@ -103,6 +108,7 @@ impl VocalParams {
                 NEUTRAL_TRACT_MM
             },
             eq: self.eq.sanitized(),
+            comp: self.comp.sanitized(),
         }
     }
 
@@ -225,6 +231,43 @@ mod tests {
         assert_eq!(s.eq.high_mid.gain_db, crate::eq::EQ_MAX_GAIN_DB);
         // Sanitizing twice is a fixpoint (idempotent).
         assert_eq!(s.sanitized(), s);
+    }
+
+    /// Phase 8.4: the compressor participates in the neutrality
+    /// decisions — an active comp breaks neutrality, a disabled one
+    /// restores it, and the sanitized values stay clamped/idempotent.
+    #[test]
+    fn comp_participates_in_neutrality_and_sanitization() {
+        let mut p = VocalParams::neutral();
+        p.comp = crate::compressor::CompPreset::VocalControl.params();
+        assert!(
+            p.comp.is_active(),
+            "VocalControl: enabled, ratio 3.5, full wet"
+        );
+        assert!(!p.is_neutral(), "active comp = not neutral");
+        assert!(p.vocal_neutral(), "but the vocal sliders still are");
+
+        p.comp.enabled = false;
+        assert!(p.is_neutral(), "disabled comp is inert again");
+
+        p.comp.enabled = true;
+        p.comp.threshold_db = -99.0;
+        p.comp.ratio = 99.0;
+        p.comp.attack_ms = 0.0;
+        p.comp.release_ms = 99_999.0;
+        p.comp.makeup_db = 99.0;
+        p.comp.mix_percent = -5.0;
+        let s = p.sanitized();
+        assert_eq!(
+            s.comp.threshold_db,
+            crate::compressor::COMP_MIN_THRESHOLD_DB
+        );
+        assert_eq!(s.comp.ratio, crate::compressor::COMP_MAX_RATIO);
+        assert_eq!(s.comp.attack_ms, crate::compressor::COMP_MIN_ATTACK_MS);
+        assert_eq!(s.comp.release_ms, crate::compressor::COMP_MAX_RELEASE_MS);
+        assert_eq!(s.comp.makeup_db, crate::compressor::COMP_MAX_MAKEUP_DB);
+        assert_eq!(s.comp.mix_percent, 0.0);
+        assert_eq!(s.sanitized(), s, "sanitization is idempotent");
     }
 
     #[test]

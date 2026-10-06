@@ -33,9 +33,10 @@ fn usage() {
          \n\
          USAGE:\n\
              micro-vocal-lab [run] [FILE]      desktop UI (optionally loads FILE)\n\
-             micro-vocal-lab process IN OUT [--pitch ST] [--air %] [--tract MM] [--profile preview|render]\n\
+             micro-vocal-lab process IN OUT [--pitch ST] [--air %] [--tract MM] [--comp-preset NAME] [--profile preview|render]\n\
              micro-vocal-lab screenshot OUT.png [FILE] [--pitch ST] [--air %] [--tract MM]\n\
                                             [--eq-preset flat|vocal|demud|air|deharsh]\n\
+                                            [--comp-preset gentle|vocal|tamer|broadcast|ny]\n\
                                             [--locale en|ar] [--width PX] [--height PX] [--playhead SEC]\n\
              micro-vocal-lab selftest [--seconds N] [DIR]\n\
              micro-vocal-lab self-check",
@@ -74,6 +75,21 @@ fn run_command(args: &[String]) {
 // ---------------------------------------------------------------------------
 // screenshot — headless UI render
 // ---------------------------------------------------------------------------
+
+/// Map a CLI preset name onto a `CompPreset` (shared by `process` and
+/// `screenshot`; aliases kept short for scripting).
+fn comp_preset_by_name(name: &str) -> Option<mvl_core::compressor::CompPreset> {
+    match name {
+        "gentle" | "Gentle" => Some(mvl_core::compressor::CompPreset::Gentle),
+        "vocal" | "control" | "Vocal Control" => {
+            Some(mvl_core::compressor::CompPreset::VocalControl)
+        }
+        "tamer" | "peaktamer" | "Peak Tamer" => Some(mvl_core::compressor::CompPreset::PeakTamer),
+        "broadcast" | "Broadcast" => Some(mvl_core::compressor::CompPreset::Broadcast),
+        "ny" | "parallel" | "NY Parallel" => Some(mvl_core::compressor::CompPreset::NyParallel),
+        _ => None,
+    }
+}
 
 fn screenshot_command(args: &[String]) {
     let mut output: Option<String> = None;
@@ -157,6 +173,22 @@ fn screenshot_command(args: &[String]) {
                 }
                 .params();
             }
+            "--comp-preset" => {
+                i += 1;
+                let name = args.get(i).map(String::as_str).unwrap_or_else(|| {
+                    eprintln!(
+                        "error: --comp-preset needs a name (gentle|vocal|tamer|broadcast|ny)"
+                    );
+                    std::process::exit(2);
+                });
+                match comp_preset_by_name(name) {
+                    Some(p) => params.comp = p.params(),
+                    None => {
+                        eprintln!("error: unknown compressor preset '{name}'");
+                        std::process::exit(2);
+                    }
+                }
+            }
             other if output.is_none() && other.ends_with(".png") => {
                 output = Some(other.to_string())
             }
@@ -198,6 +230,13 @@ fn screenshot_command(args: &[String]) {
         app.invoke_set_language("ar".into());
     }
     controller.set_params(params);
+    // Offline GR probe (Phase 8.4): with the compressor active and a
+    // take loaded, run the real engine over it once and publish the
+    // deepest GR — the static evidence shows the meter value the engine
+    // actually produced, never a decoration.
+    if let Some(gr) = controller.probe_render_gr() {
+        controller.set_comp_gr(gr);
+    }
     if let Some(ph) = playhead {
         // Through the controller: playhead line, timecode text and
         // visibility move together exactly as the live seek path does.
@@ -343,6 +382,22 @@ fn process_command(args: &[String]) {
                     Some(v) => params.tract_mm = v,
                     None => {
                         eprintln!("error: --tract needs a number (mm, 100..=260, 170 neutral)");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--comp-preset" => {
+                i += 1;
+                let name = args.get(i).map(String::as_str).unwrap_or_else(|| {
+                    eprintln!(
+                        "error: --comp-preset needs a name (gentle|vocal|tamer|broadcast|ny)"
+                    );
+                    std::process::exit(2);
+                });
+                match comp_preset_by_name(name) {
+                    Some(p) => params.comp = p.params(),
+                    None => {
+                        eprintln!("error: unknown compressor preset '{name}'");
                         std::process::exit(2);
                     }
                 }

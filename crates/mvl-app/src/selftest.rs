@@ -353,7 +353,7 @@ fn screenshot_step(report: &mut Report, take: &InterleavedAudio, out_dir: &Path)
         if locale == "ar" {
             controller.window().invoke_set_language("ar".into());
         }
-        let size = slint::PhysicalSize::new(1280, 800);
+        let size = slint::PhysicalSize::new(1280, 1060);
         let path = out_dir.join(name);
         match headless::render_to_png(controller.window(), size, &path) {
             Ok(()) => report.push(

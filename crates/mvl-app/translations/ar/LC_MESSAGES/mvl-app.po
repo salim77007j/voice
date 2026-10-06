@@ -235,3 +235,60 @@ msgstr "تعزيز الهواء"
 
 msgid "De-Harsh"
 msgstr "تنعيم الحدّة"
+
+msgid "COMPRESSOR"
+msgstr "الضاغِط"
+
+msgid "Bypass the whole compressor (bit-exact)"
+msgstr "تجاوز الضاغِط بالكامل (بدون أي تغيير بالبت)"
+
+msgid "Gentle"
+msgstr "لطيف"
+
+msgid "Vocal Control"
+msgstr "ضبط الصوت"
+
+msgid "Peak Tamer"
+msgstr "ترويض القمم"
+
+msgid "Broadcast"
+msgstr "بث"
+
+msgid "NY Parallel"
+msgstr "نيويورك المتوازي"
+
+msgid "Reset the compressor to neutral"
+msgstr "إعادة الضاغِط إلى الحياد"
+
+msgid "Thresh"
+msgstr "العتبة"
+
+msgid "Ratio"
+msgstr "النسبة"
+
+msgid "Attack"
+msgstr "الهجوم"
+
+msgid "Release"
+msgstr "التحرر"
+
+msgid "Knee"
+msgstr "الركبة"
+
+msgid "Makeup"
+msgstr "التعويض"
+
+msgid "Mix"
+msgstr "المزج"
+
+msgid "Transfer"
+msgstr "التحويل"
+
+msgid "Gain reduction"
+msgstr "خفض الكسب"
+
+msgid "Idle — no reduction"
+msgstr "خامل — لا خفض"
+
+msgid "Bypassed"
+msgstr "متجاوَز"

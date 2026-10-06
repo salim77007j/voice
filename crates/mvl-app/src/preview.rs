@@ -63,6 +63,9 @@ struct Shared {
     length_frames: AtomicU64,
     /// `f32::to_bits` of the deepest applied air gain (live meter).
     air_db_bits: AtomicU32,
+    /// `f32::to_bits` of the deepest compressor gain reduction of the
+    /// most recent engine block (live GR meter, Phase 8.4).
+    gr_db_bits: AtomicU32,
     guard_engaged: AtomicBool,
     /// Device-clock anchored audible position (phase 8.2 sync fix).
     playhead: mvl_io::playhead::PlayheadAnchor,
@@ -81,6 +84,7 @@ impl Shared {
             channels: AtomicU32::new(1),
             length_frames: AtomicU64::new(0),
             air_db_bits: AtomicU32::new(0.0f32.to_bits()),
+            gr_db_bits: AtomicU32::new(0.0f32.to_bits()),
             guard_engaged: AtomicBool::new(false),
             playhead: mvl_io::playhead::PlayheadAnchor::new(),
         })
@@ -183,6 +187,15 @@ impl PreviewPipeline {
             .iter()
             .map(VocalEngine::applied_air_db)
             .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Deepest compressor gain reduction across channel engines from the
+    /// most recent processed block (live GR meter, Phase 8.4).
+    fn current_gr_db(&self) -> f32 {
+        self.engines
+            .iter()
+            .map(VocalEngine::current_gr_db)
+            .fold(0.0, f32::min)
     }
 
     fn guard_engaged(&self) -> bool {
@@ -508,6 +521,13 @@ impl PreviewPlayer {
         f32::from_bits(self.shared.air_db_bits.load(Ordering::Acquire))
     }
 
+    /// Deepest compressor gain reduction of the most recent block (dB,
+    /// ≤ 0) — the live GR meter value. Phase 8.4.
+    #[must_use]
+    pub fn current_gr_db(&self) -> f32 {
+        f32::from_bits(self.shared.gr_db_bits.load(Ordering::Acquire))
+    }
+
     /// Whether the true-peak guard engaged (status honesty).
     #[must_use]
     pub fn guard_engaged(&self) -> bool {
@@ -795,6 +815,9 @@ fn spawn_feeder(
                 shared
                     .air_db_bits
                     .store(pipeline.applied_air_db().to_bits(), Ordering::Release);
+                shared
+                    .gr_db_bits
+                    .store(pipeline.current_gr_db().to_bits(), Ordering::Release);
                 shared
                     .guard_engaged
                     .store(pipeline.guard_engaged(), Ordering::Release);

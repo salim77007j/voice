@@ -204,18 +204,21 @@ fn screenshot_renders_real_pixels_en_and_ar() {
         assert!(app.get_level_l() > 0.0, "master meter must register signal");
         assert!(!app.get_clip_latch(), "-6 dBFS material must not clip");
         let out = dir.join("ui-en.png");
-        headless::render_to_png(app, slint::PhysicalSize::new(1280, 800), &out).unwrap();
+        headless::render_to_png(app, slint::PhysicalSize::new(1280, 1060), &out).unwrap();
         assert!(
             out.exists() && out.metadata().unwrap().len() > 20_000,
             "PNG must be written with real content"
         );
 
         // pixel truth: the Phase 7.2 rack design tokens must be rendered.
-        // Layout at 1280×800: 6px outer padding (bg-base #1A1D21), then
-        // nameplate (52px), waveform rack (stretch), main row (292px),
-        // transport (60px), status bar (26px).
-        let buf = headless::render_to_buffer(app, slint::PhysicalSize::new(1280, 800));
-        assert_eq!((buf.width(), buf.height()), (1280, 800));
+        // Layout at 1280×1060 (two post-chain rack rows: EQ + compressor,
+        // Phase 8.4): 6px outer padding (bg-base #1A1D21), then nameplate
+        // (52px), waveform rack (stretch), EQ (196px), compressor (196px),
+        // main row (292px), transport (60px), status bar (26px) — the
+        // waveform gets ≈190px of stretch, mid ≈ y 159; the status strip
+        // centers ≈ y 1049.
+        let buf = headless::render_to_buffer(app, slint::PhysicalSize::new(1280, 1060));
+        assert_eq!((buf.width(), buf.height()), (1280, 1060));
         let px = buf.as_bytes();
         let at = |x: u32, y: u32| {
             let o = ((y * 1280 + x) * 3) as usize;
@@ -224,7 +227,7 @@ fn screenshot_renders_real_pixels_en_and_ar() {
         // outer padding is app background #1A1D21 at the very corner
         assert_eq!(at(4, 4), (26, 29, 33), "corner must be bg-base #1A1D21");
         // status bar interior is #1E2126 (bottom strip)
-        let status = at(640, 789);
+        let status = at(640, 1049);
         assert!(
             (status.0 as i32 - 30).abs() <= 2
                 && (status.1 as i32 - 33).abs() <= 2
@@ -234,7 +237,7 @@ fn screenshot_renders_real_pixels_en_and_ar() {
         // waveform rack interior: panel #242729, the blue trace #4A90E2,
         // or the gradient RMS body (alpha 60..190 over panel) — a
         // blue-dominant pixel in all cases, never a stray colour.
-        let mid = at(640, 230);
+        let mid = at(640, 159);
         assert!(
             mid == (36, 39, 41) || mid == (74, 144, 226) || is_blue(mid),
             "waveform canvas must be panel or trace-coloured, got {mid:?}"
@@ -259,9 +262,9 @@ fn screenshot_renders_real_pixels_en_and_ar() {
         let app = c.window();
         app.invoke_set_language("ar".into());
         let out = dir.join("ui-ar.png");
-        headless::render_to_png(app, slint::PhysicalSize::new(1280, 800), &out).unwrap();
+        headless::render_to_png(app, slint::PhysicalSize::new(1280, 1060), &out).unwrap();
         assert!(out.exists() && out.metadata().unwrap().len() > 20_000);
-        let buf = headless::render_to_buffer(app, slint::PhysicalSize::new(1280, 800));
+        let buf = headless::render_to_buffer(app, slint::PhysicalSize::new(1280, 1060));
         let px = buf.as_bytes();
         let at = |x: u32, y: u32| {
             let o = ((y * 1280 + x) * 3) as usize;

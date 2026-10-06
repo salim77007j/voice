@@ -43,6 +43,7 @@ use rustfft::num_complex::Complex64;
 
 use crate::analysis::{FrameAnalyzer, FrameFeatures};
 use crate::breath::BreathProcessor;
+use crate::compressor::CompressorProcessor;
 use crate::eq::EqProcessor;
 use crate::error::EngineError;
 use crate::formant::FormantProcessor;
@@ -64,6 +65,9 @@ pub struct RenderResult {
     pub limiter_engaged: bool,
     /// Deepest air/breath gain applied (dB, ≤ 0). The 0.1 dB readout.
     pub applied_air_db: f32,
+    /// Deepest gain reduction applied over the whole render (dB, ≤ 0;
+    /// 0.0 when the compressor never engaged). Phase 8.4.
+    pub applied_gr_db: f32,
 }
 
 /// The streaming vocal engine.
@@ -95,6 +99,15 @@ pub struct VocalEngine {
     guard_engaged: bool,
     /// Four-band channel EQ (Phase 8.3), one per engine = per channel.
     eq: EqProcessor,
+    /// Broadband compressor (Phase 8.4), the last module in the chain.
+    comp: CompressorProcessor,
+    /// Whether the compressor processed the previous block (state-reset
+    /// bookkeeping when it goes inert mid-stream).
+    comp_engaged: bool,
+    /// Deepest GR of the most recent processed block (live meter value).
+    last_block_gr_db: f32,
+    /// Deepest GR so far over the whole stream (render aggregate).
+    deepest_gr_db: f64,
 
     frames: Vec<FrameFeatures>,
     applied_air_db: f64,
@@ -150,6 +163,10 @@ impl VocalEngine {
             src_peak: 0.0,
             guard_engaged: false,
             eq: EqProcessor::new(sample_rate),
+            comp: CompressorProcessor::new(sample_rate),
+            comp_engaged: false,
+            last_block_gr_db: 0.0,
+            deepest_gr_db: 0.0,
             frames: Vec::new(),
             applied_air_db: 0.0,
             chain_in: 0,
@@ -187,6 +204,33 @@ impl VocalEngine {
         self.guard_engaged
     }
 
+    /// Deepest gain reduction of the most recent processed block (dB,
+    /// ≤ 0) — the honest live meter value: it recovers naturally as the
+    /// music eases, freezes when the transport pauses, and reads 0.0
+    /// whenever the compressor is inert. Phase 8.4.
+    #[must_use]
+    pub fn current_gr_db(&self) -> f32 {
+        self.last_block_gr_db
+    }
+
+    /// Run the compressor stage for this block (if active) and record
+    /// the metering. Inert params leave the buffer bit-exact untouched
+    /// and reset the envelope bookkeeping so a later re-engage is clean.
+    fn note_gr(&mut self, params: &VocalParams, out: &mut [f32]) {
+        let active = params.comp.is_active();
+        if !active && self.comp_engaged {
+            self.comp.reset();
+        }
+        self.comp_engaged = active;
+        let gr = if active {
+            self.comp.process(&params.comp, out)
+        } else {
+            0.0
+        };
+        self.last_block_gr_db = gr;
+        self.deepest_gr_db = self.deepest_gr_db.min(f64::from(gr));
+    }
+
     /// Deepest air/breath gain applied so far (dB, ≤ 0). This is the
     /// honest live meter value for the UI (`RenderResult::applied_air_db`
     /// is the same quantity after a full offline render).
@@ -215,19 +259,30 @@ impl VocalEngine {
         self.src_peak = self.src_peak.max(in_peak);
 
         if !self.engaged && params.is_neutral() {
-            // Bit-exact bypass (invariant #1) — vocal chain AND EQ inert.
+            // Bit-exact bypass (invariant #1) — vocal chain, EQ and comp
+            // all inert. The comp resets so a later re-engage starts
+            // from a fresh envelope (no stale gain jump at the seam).
+            if self.comp_engaged {
+                self.comp.reset();
+                self.comp_engaged = false;
+            }
+            self.last_block_gr_db = 0.0;
             return Ok(input.to_vec());
         }
         if !self.engaged && params.vocal_neutral() {
-            // EQ-only session (Phase 8.3): the biquads are per-sample and
-            // stateless across blocks, so the STFT machinery stays off —
-            // engaging it for a pure EQ would burn CPU and forfeit the
-            // instant A/B the bypass gives. The EQ still gets its own
-            // bypass semantics (an inert EQ here cannot happen: that is
-            // the branch above).
+            // Post-chain-only session (Phases 8.3 + 8.4): the EQ is
+            // per-sample stateless and the compressor is per-sample
+            // arithmetic on a 3-f64 state, so the STFT machinery stays
+            // off — engaging it for a pure post-chain would burn CPU and
+            // forfeit the instant A/B the bypass gives. Each module
+            // still enforces its own bypass semantics (an inert module
+            // leaves the buffer untouched).
             self.params = params;
             let mut out = input.to_vec();
-            self.eq.process(&params.eq, &mut out);
+            if params.eq.is_active() {
+                self.eq.process(&params.eq, &mut out);
+            }
+            self.note_gr(&params, &mut out);
             return Ok(out);
         }
         self.engaged = true;
@@ -251,11 +306,18 @@ impl VocalEngine {
 
         let mut out = self.collect_output(input.len() + 4096);
         self.guard_block(&mut out);
-        // Phase 8.3: the EQ is the last module — after the guard, so a
-        // user boost can exceed the ceiling exactly like any channel EQ
-        // placed post-limiter (the offline source-relative bound in
-        // `render` still sees the boosted signal).
-        self.eq.process(&self.params.eq, &mut out);
+        // Phase 8.3: the EQ runs after the guard, so a user boost can
+        // exceed the ceiling exactly like any channel EQ placed
+        // post-limiter (the offline source-relative bound in `render`
+        // still sees the boosted signal).
+        if self.params.eq.is_active() {
+            self.eq.process(&self.params.eq, &mut out);
+        }
+        // Phase 8.4: the compressor is the last module — it shapes the
+        // dynamics of the already-toned signal, and its makeup gain can
+        // exceed the ceiling exactly like the EQ's boosts (same offline
+        // bound applies in `render`).
+        self.note_gr(&params, &mut out);
         self.chain_out += out.len();
         Ok(out)
     }
@@ -296,8 +358,13 @@ impl VocalEngine {
             out
         };
         self.guard_block(&mut out);
-        // Same post-guard EQ stage as `process` (Phase 8.3).
-        self.eq.process(&self.params.eq, &mut out);
+        // Same post-guard EQ + compressor stages as `process` (8.3/8.4):
+        // the tail keeps the compressor's release in force, and the
+        // stream total stays exactly the input length.
+        if self.params.eq.is_active() {
+            self.eq.process(&self.params.eq, &mut out);
+        }
+        self.note_gr(&params, &mut out);
         self.chain_out += out.len();
         Ok(out)
     }
@@ -329,6 +396,7 @@ impl VocalEngine {
             frames: engine.frames,
             limiter_engaged: engaged || engine.guard_engaged,
             applied_air_db: engine.applied_air_db as f32,
+            applied_gr_db: engine.deepest_gr_db as f32,
         })
     }
 
@@ -1039,5 +1107,126 @@ mod tests {
             let out = VocalEngine::render(&sig, RATE, params, QualityProfile::Preview).unwrap();
             assert_eq!(out.output, sig, "inert EQ must keep invariant #1 bit-exact");
         }
+    }
+
+    // ---- Phase 8.4: the compressor -------------------------------------
+
+    fn comp_params() -> VocalParams {
+        let mut p = VocalParams::neutral();
+        p.comp = crate::compressor::CompPreset::VocalControl.params();
+        p
+    }
+
+    /// A comp-only session must NOT engage the STFT machinery: the output
+    /// equals a bare `CompressorProcessor` run over the input, sample for
+    /// sample, and deactivating it afterwards returns to the bit-exact
+    /// bypass instantly (with a fresh envelope, not a stale one).
+    #[test]
+    fn comp_only_bypasses_the_stft_machinery() {
+        let sig = ts::harmonic_stack(220.0, 10, 0.5, 8_000, RATE);
+        let params = comp_params();
+        assert!(!params.is_neutral() && params.vocal_neutral() && params.comp.is_active());
+
+        let mut engine = VocalEngine::new(RATE, QualityProfile::Preview).unwrap();
+        let out = engine.process(&sig, params).unwrap();
+        assert_eq!(
+            out.len(),
+            sig.len(),
+            "comp-only streams 1:1 (no STFT fill lag)"
+        );
+        assert_ne!(out, sig, "a 3.5:1 compressor must change the take");
+
+        let mut bare = crate::compressor::CompressorProcessor::new(RATE);
+        let mut reference = sig.clone();
+        bare.process(&params.comp, &mut reference);
+        assert_eq!(
+            out, reference,
+            "comp-only must be exactly the bare processor"
+        );
+        assert!(
+            engine.current_gr_db() < -1.0,
+            "meter must see real reduction"
+        );
+
+        // Back to fully neutral: instant bit-exact bypass, and the
+        // envelope state is gone (re-engage starts fresh).
+        let again = engine.process(&sig, VocalParams::neutral()).unwrap();
+        assert_eq!(again, sig, "deactivated comp must restore the bypass");
+        assert_eq!(engine.current_gr_db(), 0.0);
+        assert!(engine.flush().unwrap().is_empty());
+    }
+
+    /// Chain order: the compressor runs **after** the EQ. A comp+EQ
+    /// session (vocal sliders neutral) must equal EQ-then-comp applied
+    /// manually — and either module alone inert keeps the other honest.
+    #[test]
+    fn comp_runs_after_the_eq() {
+        let sig = ts::harmonic_stack(220.0, 10, 0.5, 16_000, RATE);
+        let mut params = VocalParams::neutral();
+        params.eq = crate::eq::EqPreset::VocalPresence.params();
+        params.comp = crate::compressor::CompPreset::VocalControl.params();
+        assert!(params.vocal_neutral() && params.eq.is_active() && params.comp.is_active());
+
+        let mut engine = VocalEngine::new(RATE, QualityProfile::Preview).unwrap();
+        let out = engine.process(&sig, params).unwrap();
+
+        let mut eq = crate::eq::EqProcessor::new(RATE);
+        let mut comp = crate::compressor::CompressorProcessor::new(RATE);
+        let mut reference = sig.clone();
+        eq.process(&params.eq, &mut reference);
+        comp.process(&params.comp, &mut reference);
+        assert_eq!(
+            out, reference,
+            "engine must apply EQ first, then compression"
+        );
+    }
+
+    /// The full engaged chain keeps its invariants with the comp in
+    /// place: length exactness, the aggregate GR meter on RenderResult,
+    /// and the bit-exact bypass whenever the comp goes inert (even with
+    /// threshold/ratio knobs parked at non-neutral values).
+    #[test]
+    fn comp_in_the_engaged_chain_and_render_meter() {
+        let sig = ts::harmonic_stack(220.0, 10, 0.5, 16_000, RATE);
+        let vocal = VocalParams {
+            pitch_semitones: 3.0,
+            air_percent: -20,
+            ..VocalParams::neutral()
+        };
+
+        let plain = VocalEngine::render(&sig, RATE, vocal, QualityProfile::Preview).unwrap();
+        assert_eq!(plain.applied_gr_db, 0.0, "no comp → no GR");
+
+        let mut squeezed = vocal;
+        squeezed.comp = crate::compressor::CompPreset::VocalControl.params();
+        let with_comp = VocalEngine::render(&sig, RATE, squeezed, QualityProfile::Preview).unwrap();
+        assert_eq!(with_comp.output.len(), sig.len(), "length invariant holds");
+        assert!(
+            with_comp.applied_gr_db <= -1.0,
+            "the render meter must record real reduction: {}",
+            with_comp.applied_gr_db
+        );
+        let diff = plain
+            .output
+            .iter()
+            .zip(&with_comp.output)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            diff > 1_000,
+            "compression must alter the render ({diff} samples)"
+        );
+
+        // Knobs parked but master off: bit-exact invariant #1.
+        let mut parked = VocalParams::neutral();
+        parked.comp = crate::compressor::CompPreset::Broadcast.params();
+        parked.comp.enabled = false;
+        assert!(parked.is_neutral());
+        let bypass = VocalEngine::render(&sig, RATE, parked, QualityProfile::Preview).unwrap();
+        assert_eq!(
+            bypass.output, sig,
+            "disabled comp keeps invariant #1 bit-exact"
+        );
+        assert_eq!(bypass.applied_gr_db, 0.0);
     }
 }

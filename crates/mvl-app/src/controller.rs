@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use mvl_core::compressor::{transfer_pairs_db, COMP_PRESETS};
 use mvl_core::eq::{response_curve_db, EqParams, DEFAULT_BAND_FREQS, EQ_CURVE_POINTS, EQ_PRESETS};
 use mvl_core::params::{MAX_PITCH_SEMITONES, NEUTRAL_TRACT_MM};
 use mvl_core::spectrum::{RtaAnalyzer, RtaSnapshot, CLIP_DBFS, RTA_BANDS};
@@ -340,6 +341,44 @@ impl Controller {
             });
         }
 
+        // ---- compressor (Phase 8.4) -------------------------------------
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_set_comp_enabled(move |on| {
+                if let Some(app) = weak.upgrade() {
+                    set_comp_enabled(&app, &st, on);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_comp_param_changed(move |param, value| {
+                if let Some(app) = weak.upgrade() {
+                    comp_param_changed(&app, &st, param, f64::from(value) as f32);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_comp_preset_chosen(move |idx| {
+                if let Some(app) = weak.upgrade() {
+                    comp_preset_chosen(&app, &st, idx);
+                }
+            });
+        }
+        {
+            let weak = app.as_weak();
+            let st = Rc::clone(&state);
+            app.on_reset_comp(move || {
+                if let Some(app) = weak.upgrade() {
+                    reset_comp(&app, &st);
+                }
+            });
+        }
+
         // periodic refresh + inbox drain
         let timer = slint::Timer::default();
         {
@@ -411,6 +450,45 @@ impl Controller {
         self.app.set_playhead(t as f32);
         self.app.set_position_text(format::timecode(t).into());
         self.app.set_show_playhead(true);
+    }
+
+    /// Publish the gain-reduction meter directly (offline probe path):
+    /// the screenshot renderer runs a real `VocalEngine::render` of the
+    /// loaded take and feeds the deepest GR here, so the static evidence
+    /// shows the meter value the engine actually produced.
+    pub fn set_comp_gr(&self, gr_db: f32) {
+        self.app.set_comp_gr_db(gr_db);
+        self.app
+            .set_comp_gr_text(format::comp_gr_text(gr_db).into());
+    }
+
+    /// Offline probe: render the loaded preview audio through the real
+    /// engine with the current params and report the deepest gain
+    /// reduction (dB, ≤ 0). `None` when there is no session. Used by the
+    /// screenshot evidence path — the same engine code the export runs.
+    pub fn probe_render_gr(&self) -> Option<f32> {
+        let inner = self.state.inner.borrow();
+        let session = inner.session.as_ref()?;
+        let preview = &session.preview;
+        let ch = preview.channels as usize;
+        let params = inner.params;
+        if !params.comp.is_active() {
+            return None;
+        }
+        let frames = preview.frames();
+        let mut deepest = 0.0f32;
+        for c in 0..ch {
+            let chan: Vec<f32> = (0..frames).map(|f| preview.data[f * ch + c]).collect();
+            if let Ok(out) = mvl_core::VocalEngine::render(
+                &chan,
+                preview.sample_rate,
+                params,
+                mvl_core::QualityProfile::Preview,
+            ) {
+                deepest = deepest.min(out.applied_gr_db);
+            }
+        }
+        Some(deepest)
     }
 
     /// Current parameters.
@@ -1024,6 +1102,7 @@ fn push_all_params(app: &crate::AppWindow, state: &State) {
     app.invoke_set_air_field(format::air_field_text(p.air_percent).into());
     app.invoke_set_tract_field(format::tract_field_text(p.tract_mm).into());
     push_eq(app, state, &p.eq);
+    push_comp(app, &p.comp);
 }
 
 // ---- EQ (Phase 8.3) -------------------------------------------------------
@@ -1176,6 +1255,152 @@ fn reset_eq(app: &crate::AppWindow, state: &State) {
     push_all_params(app, state);
 }
 
+// ---- compressor (Phase 8.4) ------------------------------------------------
+
+/// Publish the whole compressor state: knob values, canonical texts,
+/// transfer-curve path commands (static gain-computer math from
+/// mvl-core), master flags and the active-preset index.
+fn push_comp(app: &crate::AppWindow, comp: &mvl_core::compressor::CompressorParams) {
+    let comp = comp.sanitized();
+
+    app.set_comp_ui(crate::CompUi {
+        threshold: comp.threshold_db,
+        ratio: comp.ratio,
+        attack: comp.attack_ms,
+        release: comp.release_ms,
+        knee: comp.knee_db,
+        makeup: comp.makeup_db,
+        mix: comp.mix_percent,
+        thr_text: format::comp_threshold_text(comp.threshold_db).into(),
+        ratio_text: format::comp_ratio_text(comp.ratio).into(),
+        att_text: format::comp_ms_text(comp.attack_ms).into(),
+        rel_text: format::comp_ms_text(comp.release_ms).into(),
+        knee_text: format::comp_knee_text(comp.knee_db).into(),
+        makeup_text: format::comp_makeup_text(comp.makeup_db).into(),
+        mix_text: format::comp_mix_text(comp.mix_percent).into(),
+        enabled: comp.enabled,
+    });
+    app.set_comp_enabled(comp.enabled);
+    app.set_comp_active(comp.is_active());
+    app.set_comp_preset_index(matching_comp_preset_index(&comp));
+
+    let (unity, line, fill) = comp_curve_paths(&comp);
+    app.set_comp_unity_line(unity.into());
+    app.set_comp_curve_line(line.into());
+    app.set_comp_curve_fill(fill.into());
+    // threshold rule position on the −80…0 dB axis
+    app.set_comp_thr_x(((f64::from(comp.threshold_db) + 80.0) / 80.0) as f32);
+}
+
+/// Path commands for the transfer curve in the 260×260 viewbox (both
+/// axes −80…0 dBFS): the unity diagonal for reference plus the static
+/// gain-computer curve and its fill area.
+fn comp_curve_paths(comp: &mvl_core::compressor::CompressorParams) -> (String, String, String) {
+    const V: f64 = 260.0;
+    let to_xy = |x_db: f64, y_db: f64| -> (f64, f64) {
+        let px = (x_db + 80.0) / 80.0 * V;
+        let py = (1.0 - (y_db + 80.0) / 80.0) * V;
+        (px, py)
+    };
+
+    // unity diagonal: from (−80, −80) to (0, 0)
+    let (x0, y0) = to_xy(-80.0, -80.0);
+    let (x1, y1) = to_xy(0.0, 0.0);
+    let unity = format!("M {x0:.1} {y0:.1} L {x1:.1} {y1:.1}");
+
+    let pairs = transfer_pairs_db(comp, 65);
+    let n = pairs.len();
+    let mut line = String::with_capacity(n * 14);
+    let mut fill = String::with_capacity(n * 14 + 24);
+    for (i, (x_db, y_db)) in pairs.iter().enumerate() {
+        let (x, y) = to_xy(*x_db, *y_db);
+        if i == 0 {
+            line.push_str(&format!("M {x:.1} {y:.1}"));
+            fill.push_str(&format!("M {x:.1} {V} L {x:.1} {y:.1}"));
+        } else {
+            line.push_str(&format!(" L {x:.1} {y:.1}"));
+            fill.push_str(&format!(" L {x:.1} {y:.1}"));
+        }
+    }
+    let (xe, _) = to_xy(0.0, 0.0);
+    fill.push_str(&format!(" L {xe:.1} {V} Z"));
+    (unity, line, fill)
+}
+
+/// Which preset (display index) the params currently equal, if any —
+/// drives the ComboBox highlight (custom settings match nothing and
+/// keep the current index; the neutral set maps to no highlight → 0).
+fn matching_comp_preset_index(comp: &mvl_core::compressor::CompressorParams) -> i32 {
+    COMP_PRESETS
+        .iter()
+        .position(|p| p.params().sanitized() == comp.sanitized())
+        .map_or(0, |i| i as i32)
+}
+
+fn set_comp_enabled(app: &crate::AppWindow, state: &State, on: bool) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        inner.params.comp.enabled = on;
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
+/// param: 0 threshold, 1 ratio, 2 attack, 3 release, 4 knee, 5 makeup,
+/// 6 mix (the `CompParam` global in the widget). The canonical value is
+/// re-sanitized and pushed back, so knob flicks can never leave the
+/// documented ranges in the model.
+fn comp_param_changed(app: &crate::AppWindow, state: &State, param: i32, value: f32) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        let mut comp = inner.params.comp;
+        match param.clamp(0, 6) {
+            0 => comp.threshold_db = value,
+            1 => comp.ratio = value,
+            2 => comp.attack_ms = value,
+            3 => comp.release_ms = value,
+            4 => comp.knee_db = value,
+            5 => comp.makeup_db = value,
+            _ => comp.mix_percent = value,
+        }
+        inner.params.comp = comp.sanitized();
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
+fn comp_preset_chosen(app: &crate::AppWindow, state: &State, idx: i32) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        if let Some(preset) = COMP_PRESETS.get(usize::try_from(idx).unwrap_or(0)) {
+            inner.params.comp = preset.params();
+            let params = inner.params;
+            if let Some(p) = &inner.player {
+                let _ = p.set_params(params);
+            }
+        }
+    }
+    push_all_params(app, state);
+}
+
+fn reset_comp(app: &crate::AppWindow, state: &State) {
+    {
+        let mut inner = state.inner.borrow_mut();
+        inner.params.comp = mvl_core::compressor::CompressorParams::neutral();
+        let params = inner.params;
+        if let Some(p) = &inner.player {
+            let _ = p.set_params(params);
+        }
+    }
+    push_all_params(app, state);
+}
+
 // ---- language -------------------------------------------------------------
 
 fn set_language(app: &crate::AppWindow, state: &State, locale: &str) {
@@ -1317,6 +1542,12 @@ fn ui_tick(app: &crate::AppWindow, state: &State) {
             "bypass (neutral)".to_string()
         };
         app.set_air_detail_text(air_detail.into());
+
+        // live compressor telemetry (Phase 8.4): deepest GR of the most
+        // recent engine block — recovers with the music, freezes on pause
+        let gr = player.current_gr_db();
+        app.set_comp_gr_db(gr);
+        app.set_comp_gr_text(format::comp_gr_text(gr).into());
     }
 
     // 2.5) RTA spectrum + master levels (Phase 7.2 analysis rack).

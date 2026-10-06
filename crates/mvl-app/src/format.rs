@@ -157,6 +157,58 @@ pub fn eq_gain_text(gain_db: f32) -> String {
     format!("{gain_db:+.1} dB")
 }
 
+// ---- compressor (Phase 8.4) ------------------------------------------------
+
+/// Canonical text for the compressor threshold readout: a *level*, so no
+/// sign padding (`-20.0 dB`, `0.0 dB`).
+#[must_use]
+pub fn comp_threshold_text(threshold_db: f32) -> String {
+    format!("{threshold_db:.1} dB")
+}
+
+/// Canonical text for a ratio readout: `3.5:1`.
+#[must_use]
+pub fn comp_ratio_text(ratio: f32) -> String {
+    format!("{ratio:.1}:1")
+}
+
+/// Canonical text for a time-constant readout: one decimal always
+/// (`10.0 ms`, `250.0 ms`) so the column width never jumps.
+#[must_use]
+pub fn comp_ms_text(ms: f32) -> String {
+    format!("{ms:.1} ms")
+}
+
+/// Canonical text for the knee width readout.
+#[must_use]
+pub fn comp_knee_text(knee_db: f32) -> String {
+    format!("{knee_db:.1} dB")
+}
+
+/// Canonical text for the makeup readout: signed dB (wet path gain).
+#[must_use]
+pub fn comp_makeup_text(makeup_db: f32) -> String {
+    format!("{makeup_db:+.1} dB")
+}
+
+/// Canonical text for the mix readout: whole percent.
+#[must_use]
+pub fn comp_mix_text(percent: f32) -> String {
+    format!("{percent:.0} %")
+}
+
+/// Canonical text for the live gain-reduction meter: signed dB, 1
+/// decimal, always ≤ 0 (`-3.2 dB`); `0.0 dB` when idle.
+#[must_use]
+pub fn comp_gr_text(gr_db: f32) -> String {
+    let gr = if gr_db.is_finite() {
+        gr_db.min(0.0)
+    } else {
+        0.0
+    };
+    format!("{gr:.1} dB")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +304,24 @@ mod tests {
         assert_eq!(eq_gain_text(2.5), "+2.5 dB");
         assert_eq!(eq_gain_text(-3.0), "-3.0 dB");
         assert_eq!(eq_gain_text(0.0), "+0.0 dB");
+    }
+
+    #[test]
+    fn comp_texts_are_canonical() {
+        assert_eq!(comp_threshold_text(-20.0), "-20.0 dB");
+        assert_eq!(comp_threshold_text(0.0), "0.0 dB");
+        assert_eq!(comp_ratio_text(3.5), "3.5:1");
+        assert_eq!(comp_ratio_text(1.0), "1.0:1");
+        assert_eq!(comp_ms_text(10.0), "10.0 ms");
+        assert_eq!(comp_ms_text(2_000.0), "2000.0 ms");
+        assert_eq!(comp_knee_text(6.0), "6.0 dB");
+        assert_eq!(comp_makeup_text(2.5), "+2.5 dB");
+        assert_eq!(comp_makeup_text(0.0), "+0.0 dB");
+        assert_eq!(comp_mix_text(100.0), "100 %");
+        assert_eq!(comp_mix_text(30.0), "30 %");
+        assert_eq!(comp_gr_text(-3.24), "-3.2 dB");
+        assert_eq!(comp_gr_text(0.0), "0.0 dB");
+        assert_eq!(comp_gr_text(1.5), "0.0 dB", "GR never reads positive");
+        assert_eq!(comp_gr_text(f32::NAN), "0.0 dB");
     }
 }

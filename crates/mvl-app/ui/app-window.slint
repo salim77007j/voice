@@ -27,7 +27,9 @@ import { ComboBox } from "std-widgets.slint";
 import { WaveformView, RulerTick } from "widgets/waveform-view.slint";
 import { ModuleCard } from "widgets/module-card.slint";
 import { EqPanel, EqBandUi } from "widgets/eq-panel.slint";
+import { CompPanel, CompUi } from "widgets/comp-panel.slint";
 export { EqBandUi }
+export { CompUi }
 import { RackPanel, ScrewHead, LedDot, EngravedLabel } from "widgets/rack.slint";
 import { SpectrumView } from "widgets/spectrum-view.slint";
 import { LevelMeter } from "widgets/level-meter.slint";
@@ -132,6 +134,21 @@ export component AppWindow inherits Window {
     in-out property <string> eq-curve-fill: "";
     in-out property <int> eq-preset-index: 0;
 
+    // broadband compressor (Phase 8.4): canonical state lives in the
+    // Rust controller; the transfer-curve path strings are the static
+    // gain-computer math computed in Rust (viewbox 260×260) and the GR
+    // meter is live engine telemetry — nothing here is decorative
+    in-out property <CompUi> comp-ui;
+    in-out property <bool> comp-enabled: false;
+    in-out property <bool> comp-active: false;
+    in-out property <float> comp-gr-db: 0.0;
+    in-out property <string> comp-gr-text: "0.0 dB";
+    in-out property <string> comp-curve-line: "";
+    in-out property <string> comp-unity-line: "";
+    in-out property <string> comp-curve-fill: "";
+    in-out property <float> comp-thr-x: 0.75;
+    in-out property <int> comp-preset-index: 0;
+
     // ================= actions back into the controller ==================
 
     callback new-recording-clicked();
@@ -164,6 +181,10 @@ export component AppWindow inherits Window {
     callback band-toggled(int);
     callback eq-preset-chosen(int);
     callback reset-eq();
+    callback set-comp-enabled(bool);
+    callback comp-param-changed(int, float);        // param, value
+    callback comp-preset-chosen(int);
+    callback reset-comp();
 
     // ================= layout ============================================
 
@@ -351,6 +372,25 @@ export component AppWindow inherits Window {
             band-toggled(b) => { root.band-toggled(b); }
             preset-chosen(i) => { root.eq-preset-chosen(i); }
             reset-eq() => { root.reset-eq(); }
+        }
+
+        // ---- compressor rack: broadband dynamics (Phase 8.4) ---------------
+        CompPanel {
+            height: 196px;
+            has-audio: root.has-audio;
+            comp: root.comp-ui;
+            comp-active: root.comp-active;
+            gr-db: root.comp-gr-db;
+            gr-text: root.comp-gr-text;
+            curve-line: root.comp-curve-line;
+            unity-line: root.comp-unity-line;
+            curve-fill: root.comp-curve-fill;
+            thr-x: root.comp-thr-x;
+            preset-index <=> root.comp-preset-index;
+            set-comp-enabled(on) => { root.set-comp-enabled(on); }
+            comp-param-changed(p, v) => { root.comp-param-changed(p, v); }
+            comp-preset-chosen(i) => { root.comp-preset-chosen(i); }
+            reset-comp() => { root.reset-comp(); }
         }
 
         // ---- main row: channel strips + analysis rack ----------------------
